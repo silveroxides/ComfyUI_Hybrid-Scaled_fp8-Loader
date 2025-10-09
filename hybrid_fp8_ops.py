@@ -68,8 +68,8 @@ def get_hybrid_fp8_ops(scale_input_enabled=False):
 
         def forward(self, input):
             if getattr(self, 'is_high_precision_layer', False):
-                weight_hp = self.weight.to(input.dtype)
-                bias_hp = self.bias.to(input.dtype) if self.bias is not None else None
+                weight_hp = self.weight.to(input.device, input.dtype)
+                bias_hp = self.bias.to(input.device, input.dtype) if self.bias is not None else None
                 return torch.nn.functional.linear(input, weight_hp, bias_hp)
             else:
                 return super().forward(input)
