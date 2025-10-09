@@ -7,7 +7,7 @@ from . import hybrid_fp8_ops
 
 # --- Exclusion Lists ---
 DISTILL_LAYER_KEYNAMES = ["distilled_guidance_layer", "final_layer", "img_in", "txt_in"]
-NERF_LAYER_KEYNAMES = ["img_in_patch", "nerf_blocks", "nerf_final_layer_conv"]
+NERF_LAYER_KEYNAMES = ["img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder"]
 
 def detect_fp8_optimizations(model_path):
     """
