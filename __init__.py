@@ -7,9 +7,7 @@ from . import hybrid_fp8_ops
 
 # --- Exclusion Lists ---
 DISTILL_LAYER_KEYNAMES = ["distilled_guidance_layer", "final_layer", "img_in", "txt_in"]
-NERF_LAYER_KEYNAMES = ["nerf_image_embedder", "img_in_patch", "nerf_final_layer_conv"]
-RADIANCE_LAYER_KEYNAMES = ["img_in_patch", "nerf_final_layer_conv"]
-T5XXL_AVOID_KEY_NAMES = ["norm", "bias", "embed_tokens", "shared"]
+NERF_LAYER_KEYNAMES = ["img_in_patch", "nerf_blocks", "nerf_final_layer_conv"]
 
 def detect_fp8_optimizations(model_path):
     """
@@ -48,7 +46,7 @@ def setup_hybrid_ops(model_path, keep_distillation, keep_nerf, radiance, t5xxl_e
 class ScaledFP8HybridUNetLoader:
     @classmethod
     def INPUT_TYPES(s):
-        return { "required": { "model_name": (folder_paths.get_filename_list("unet"), ), "keep_distillation": ("BOOLEAN", {"default": True}), "keep_nerf": ("BOOLEAN", {"default": True}), "radiance": ("BOOLEAN", {"default": False}), "t5xxl_exclusions": ("BOOLEAN", {"default": False}), } }
+        return { "required": { "model_name": (folder_paths.get_filename_list("unet"), ), "keep_distillation": ("BOOLEAN", {"default": True}), "keep_nerf": ("BOOLEAN", {"default": False}), } }
 
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load_unet"
@@ -63,7 +61,7 @@ class ScaledFP8HybridUNetLoader:
 class ScaledFP8HybridCheckpointLoader:
     @classmethod
     def INPUT_TYPES(s):
-        return { "required": { "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ), "keep_distillation": ("BOOLEAN", {"default": True}), "keep_nerf": ("BOOLEAN", {"default": True}), "radiance": ("BOOLEAN", {"default": False}), "t5xxl_exclusions": ("BOOLEAN", {"default": False}), } }
+        return { "required": { "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ), "keep_distillation": ("BOOLEAN", {"default": True}), "keep_nerf": ("BOOLEAN", {"default": False}), } }
 
     RETURN_TYPES = ("MODEL", "CLIP", "VAE")
     FUNCTION = "load_checkpoint"
@@ -80,6 +78,6 @@ NODE_CLASS_MAPPINGS = {
     "ScaledFP8HybridCheckpointLoader": ScaledFP8HybridCheckpointLoader,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ScaledFP8HybridUNetLoader": "Load Scaled FP8 UNet (Hybrid)",
-    "ScaledFP8HybridCheckpointLoader": "Load Scaled FP8 Ckpt (Hybrid)",
+    "ScaledFP8HybridUNetLoader": "Load Scaled FP8 Diffusion Model (Hybrid)",
+    "ScaledFP8HybridCheckpointLoader": "Load Scaled FP8 Checkpoint (Hybrid)",
 }
