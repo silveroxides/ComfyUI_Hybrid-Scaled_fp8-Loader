@@ -1,0 +1,14 @@
+[project]
+name = "ComfyUI_Hybrid-Scaled_fp8-Loader"
+description = 'Custom Loader for scaled_fp8 models with hybrid precision layers.'
+version = "0.0.1"
+license = { file = "LICENSE" }
+
+[project.urls]
+Repository = "https://github.com/silveroxides/ComfyUI_Hybrid-Scaled_fp8-Loader"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = "silveroxides"
+DisplayName = "ComfyUI_Hybrid-Scaled_fp8-Loader"
+Icon = ""
