@@ -6,10 +6,10 @@ from safetensors import safe_open
 from . import hybrid_fp8_ops
 
 # --- Exclusion Lists ---
-DISTILL_LAYER_KEYNAMES = ["distilled_guidance_layer", "final_layer", "img_in", "txt_in"]
-NERF_LAYER_KEYNAMES = ["img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder"]
-DISTILL_LAYER_KEYNAMES_REV2 = ["distilled_guidance_layer"]
-NERF_LAYER_KEYNAMES_REV2 = ["nerf_blocks", "nerf_image_embedder"]
+DISTILL_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "final_layer", "img_in", "txt_in"]
+NERF_LAYER_KEYNAMES_LARGE = ["img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder"]
+DISTILL_LAYER_KEYNAMES_SMALL = ["distilled_guidance_layer"]
+NERF_LAYER_KEYNAMES_SMALL = ["nerf_blocks", "nerf_image_embedder"]
 
 def detect_fp8_optimizations(model_path):
     """
@@ -29,13 +29,13 @@ def detect_fp8_optimizations(model_path):
     print("[Hybrid FP8 Loader] Standard UNet-style model detected (scale_input disabled).")
     return False
 
-def setup_hybrid_ops(model_path, keep_distillation, keep_nerf, keep_distillation_rev2, keep_nerf_rev2):
+def setup_hybrid_ops(model_path, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small):
     """A helper function to configure the hybrid ops based on user settings and model type."""
     excluded_layers = []
-    if keep_distillation: excluded_layers.extend(DISTILL_LAYER_KEYNAMES)
-    if keep_nerf: excluded_layers.extend(NERF_LAYER_KEYNAMES)
-    if keep_distillation_rev2: excluded_layers.extend(DISTILL_LAYER_KEYNAMES_REV2)
-    if keep_nerf_rev2: excluded_layers.extend(NERF_LAYER_KEYNAMES_REV2)
+    if keep_distillation_large: excluded_layers.extend(DISTILL_LAYER_KEYNAMES_LARGE)
+    if keep_nerf_large: excluded_layers.extend(NERF_LAYER_KEYNAMES_LARGE)
+    if keep_distillation_small: excluded_layers.extend(DISTILL_LAYER_KEYNAMES_SMALL)
+    if keep_nerf_small: excluded_layers.extend(NERF_LAYER_KEYNAMES_SMALL)
 
     hybrid_fp8_ops.set_high_precision_keynames(list(set(excluded_layers)))
 
@@ -50,10 +50,10 @@ class ScaledFP8HybridUNetLoader:
         return {
             "required": {
                 "model_name": (folder_paths.get_filename_list("unet"), ),
-                "keep_distillation": ("BOOLEAN", {"default": False, "tooltip": "Only first revision hybrid models which might have some LoRA issues"}),
-                "keep_nerf": ("BOOLEAN", {"default": False, "tooltip": "Only first revision hybrid models which might have some LoRA issues"}),
-                "keep_distillation_rev2": ("BOOLEAN", {"default": False, "tooltip": "Use only with second revision hybrid models. LoRA should no longer be an issue"}),
-                "keep_nerf_rev2": ("BOOLEAN", {"default": False, "tooltip": "Use only with second revision hybrid models. LoRA should no longer be an issue"}),
+                "keep_distillation_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
+                "keep_nerf_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
+                "keep_distillation_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller hybrid models. LoRA should no longer be an issue"}),
+                "keep_nerf_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller hybrid models. LoRA should no longer be an issue"}),
             }
         }
 
@@ -61,9 +61,9 @@ class ScaledFP8HybridUNetLoader:
     FUNCTION = "load_unet"
     CATEGORY = "loaders/FP8"
 
-    def load_unet(self, model_name, keep_distillation, keep_nerf, keep_distillation_rev2, keep_nerf_rev2):
+    def load_unet(self, model_name, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small):
         unet_path = folder_paths.get_full_path("unet", model_name)
-        ops = setup_hybrid_ops(unet_path, keep_distillation, keep_nerf, keep_distillation_rev2, keep_nerf_rev2)
+        ops = setup_hybrid_ops(unet_path, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small)
         model = comfy.sd.load_diffusion_model(unet_path, model_options={"custom_operations": ops})
         return (model,)
 
@@ -73,10 +73,10 @@ class ScaledFP8HybridCheckpointLoader:
         return {
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
-                "keep_distillation": ("BOOLEAN", {"default": False, "tooltip": "Only first revision hybrid models which might have some LoRA issues"}),
-                "keep_nerf": ("BOOLEAN", {"default": False, "tooltip": "Only first revision hybrid models which might have some LoRA issues"}),
-                "keep_distillation_rev2": ("BOOLEAN", {"default": False, "tooltip": "Use only with second revision hybrid models. LoRA should no longer be an issue"}),
-                "keep_nerf_rev2": ("BOOLEAN", {"default": False, "tooltip": "Use only with second revision hybrid models. LoRA should no longer be an issue"}),
+                "keep_distillation_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
+                "keep_nerf_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
+                "keep_distillation_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller hybrid models. LoRA should no longer be an issue"}),
+                "keep_nerf_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller hybrid models. LoRA should no longer be an issue"}),
             }
         }
 
@@ -84,9 +84,9 @@ class ScaledFP8HybridCheckpointLoader:
     FUNCTION = "load_checkpoint"
     CATEGORY = "loaders/FP8"
 
-    def load_checkpoint(self, ckpt_name, keep_distillation, keep_nerf, keep_distillation_rev2, keep_nerf_rev2):
+    def load_checkpoint(self, ckpt_name, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small):
         ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
-        ops = setup_hybrid_ops(ckpt_path, keep_distillation, keep_nerf, keep_distillation_rev2, keep_nerf_rev2)
+        ops = setup_hybrid_ops(ckpt_path, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small)
         out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"), model_options={"custom_operations": ops})
         return out[:3]
 
