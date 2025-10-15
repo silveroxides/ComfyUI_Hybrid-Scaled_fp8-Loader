@@ -29,7 +29,7 @@ def detect_fp8_optimizations(model_path):
     print("[Hybrid FP8 Loader] Standard UNet-style model detected (scale_input disabled).")
     return False
 
-def setup_hybrid_ops(model_path, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small):
+def setup_hybrid_ops(model_path, cpu_offload, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small):
     """A helper function to configure the hybrid ops based on user settings and model type."""
     excluded_layers = []
     if keep_distillation_large: excluded_layers.extend(DISTILL_LAYER_KEYNAMES_LARGE)
@@ -39,17 +39,17 @@ def setup_hybrid_ops(model_path, keep_distillation_large, keep_nerf_large, keep_
 
     hybrid_fp8_ops.set_high_precision_keynames(list(set(excluded_layers)))
 
-    # --- THIS IS THE KEY LOGIC ---
-    # Detect model type from the file and pass the correct flag to get_hybrid_fp8_ops
     scale_input_enabled = detect_fp8_optimizations(model_path)
-    return hybrid_fp8_ops.get_hybrid_fp8_ops(scale_input_enabled=scale_input_enabled)
+    # Pass the cpu_offload flag to the ops factory
+    return hybrid_fp8_ops.get_hybrid_fp8_ops(scale_input_enabled=scale_input_enabled, cpu_offload_enabled=cpu_offload)
 
 class ScaledFP8HybridUNetLoader:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model_name": (folder_paths.get_filename_list("unet"), ),
+                "model_name": (folder_paths.get_filename_list("unet"),),
+                "cpu_offload": ("BOOLEAN", {"default": False, "tooltip": "Force all Linear layers to offload to CPU, overriding other settings. Ideal for extreme VRAM constraints."}),
                 "keep_distillation_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
                 "keep_nerf_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
                 "keep_distillation_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller hybrid models. LoRA should no longer be an issue"}),
@@ -61,9 +61,9 @@ class ScaledFP8HybridUNetLoader:
     FUNCTION = "load_unet"
     CATEGORY = "loaders/FP8"
 
-    def load_unet(self, model_name, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small):
+    def load_unet(self, model_name, cpu_offload, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small):
         unet_path = folder_paths.get_full_path("unet", model_name)
-        ops = setup_hybrid_ops(unet_path, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small)
+        ops = setup_hybrid_ops(unet_path, cpu_offload, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small)
         model = comfy.sd.load_diffusion_model(unet_path, model_options={"custom_operations": ops})
         return (model,)
 
@@ -72,7 +72,8 @@ class ScaledFP8HybridCheckpointLoader:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
+                "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
+                "cpu_offload": ("BOOLEAN", {"default": False, "tooltip": "Force all Linear layers to offload to CPU, overriding other settings. Ideal for extreme VRAM constraints."}),
                 "keep_distillation_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
                 "keep_nerf_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
                 "keep_distillation_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller hybrid models. LoRA should no longer be an issue"}),
@@ -84,9 +85,9 @@ class ScaledFP8HybridCheckpointLoader:
     FUNCTION = "load_checkpoint"
     CATEGORY = "loaders/FP8"
 
-    def load_checkpoint(self, ckpt_name, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small):
+    def load_checkpoint(self, ckpt_name, cpu_offload, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small):
         ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
-        ops = setup_hybrid_ops(ckpt_path, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small)
+        ops = setup_hybrid_ops(ckpt_path, cpu_offload, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small)
         out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"), model_options={"custom_operations": ops})
         return out[:3]
 
