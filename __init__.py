@@ -7,9 +7,9 @@ from . import hybrid_fp8_ops
 
 # --- Exclusion Lists ---
 DISTILL_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "final_layer", "img_in", "txt_in"]
-NERF_LAYER_KEYNAMES_LARGE = ["img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder", "txt_in"]
+NERF_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder", "txt_in"]
 DISTILL_LAYER_KEYNAMES_SMALL = ["distilled_guidance_layer"]
-NERF_LAYER_KEYNAMES_SMALL = ["img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder"]
+NERF_LAYER_KEYNAMES_SMALL = ["distilled_guidance_layer", "img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder"]
 WAN_LAYER_KEYNAMES = ["patch_embedding", "text_embedding", "time_embedding", "time_projection", "head.head"]
 
 def detect_fp8_optimizations(model_path):
@@ -30,13 +30,13 @@ def detect_fp8_optimizations(model_path):
     print("[Hybrid FP8 Loader] Standard UNet-style model detected (scale_input disabled).")
     return False
 
-def setup_hybrid_ops(model_path, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small, wan):
+def setup_hybrid_ops(model_path, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan):
     """A helper function to configure the hybrid ops based on user settings and model type."""
     excluded_layers = []
-    if keep_distillation_large: excluded_layers.extend(DISTILL_LAYER_KEYNAMES_LARGE)
-    if keep_nerf_large: excluded_layers.extend(NERF_LAYER_KEYNAMES_LARGE)
-    if keep_distillation_small: excluded_layers.extend(DISTILL_LAYER_KEYNAMES_SMALL)
-    if keep_nerf_small: excluded_layers.extend(NERF_LAYER_KEYNAMES_SMALL)
+    if chroma_hybrid_large: excluded_layers.extend(DISTILL_LAYER_KEYNAMES_LARGE)
+    if radiance_hybrid_large: excluded_layers.extend(NERF_LAYER_KEYNAMES_LARGE)
+    if chroma_hybrid_small: excluded_layers.extend(DISTILL_LAYER_KEYNAMES_SMALL)
+    if radiance_hybrid_small: excluded_layers.extend(NERF_LAYER_KEYNAMES_SMALL)
     if wan: excluded_layers.extend(WAN_LAYER_KEYNAMES)
 
     hybrid_fp8_ops.set_high_precision_keynames(list(set(excluded_layers)))
@@ -52,10 +52,10 @@ class ScaledFP8HybridUNetLoader:
         return {
             "required": {
                 "model_name": (folder_paths.get_filename_list("unet"), ),
-                "keep_distillation_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
-                "keep_nerf_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
-                "keep_distillation_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller hybrid models. LoRA should no longer be an issue"}),
-                "keep_nerf_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller hybrid models. LoRA should no longer be an issue"}),
+                "chroma_hybrid_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger Chroma hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
+                "radiance_hybrid_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger Radiance hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
+                "chroma_hybrid_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller Chroma hybrid models. LoRA should no longer be an issue"}),
+                "radiance_hybrid_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller Radiance hybrid models. LoRA should no longer be an issue"}),
                 "wan": ("BOOLEAN", {"default": False, "tooltip": "for selective fp8_scaled quantization of WAN 2.2 models"}),
             }
         }
@@ -64,9 +64,9 @@ class ScaledFP8HybridUNetLoader:
     FUNCTION = "load_unet"
     CATEGORY = "loaders/FP8"
 
-    def load_unet(self, model_name, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small, wan):
+    def load_unet(self, model_name, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan):
         unet_path = folder_paths.get_full_path("unet", model_name)
-        ops = setup_hybrid_ops(unet_path, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small, wan)
+        ops = setup_hybrid_ops(unet_path, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan)
         model = comfy.sd.load_diffusion_model(unet_path, model_options={"custom_operations": ops})
         return (model,)
 
@@ -76,10 +76,10 @@ class ScaledFP8HybridCheckpointLoader:
         return {
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
-                "keep_distillation_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
-                "keep_nerf_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
-                "keep_distillation_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller hybrid models. LoRA should no longer be an issue"}),
-                "keep_nerf_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller hybrid models. LoRA should no longer be an issue"}),
+                "chroma_hybrid_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger Chroma hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
+                "radiance_hybrid_large": ("BOOLEAN", {"default": False, "tooltip": "Only the larger Radiance hybrid models which might have some LoRA issues and can only load pruned flash-heun LoRA"}),
+                "chroma_hybrid_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller Chroma hybrid models. LoRA should no longer be an issue"}),
+                "radiance_hybrid_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller Radiance hybrid models. LoRA should no longer be an issue"}),
                 "wan": ("BOOLEAN", {"default": False, "tooltip": "for selective fp8_scaled quantization of WAN 2.2 models"}),
             }
         }
@@ -88,9 +88,9 @@ class ScaledFP8HybridCheckpointLoader:
     FUNCTION = "load_checkpoint"
     CATEGORY = "loaders/FP8"
 
-    def load_checkpoint(self, ckpt_name, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small, wan):
+    def load_checkpoint(self, ckpt_name, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan):
         ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
-        ops = setup_hybrid_ops(ckpt_path, keep_distillation_large, keep_nerf_large, keep_distillation_small, keep_nerf_small, wan)
+        ops = setup_hybrid_ops(ckpt_path, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan)
         out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"), model_options={"custom_operations": ops})
         return out[:3]
 
@@ -99,6 +99,6 @@ NODE_CLASS_MAPPINGS = {
     "ScaledFP8HybridCheckpointLoader": ScaledFP8HybridCheckpointLoader,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ScaledFP8HybridUNetLoader": "Load Scaled FP8 Diffusion Model (Hybrid)",
-    "ScaledFP8HybridCheckpointLoader": "Load Scaled FP8 Checkpoint (Hybrid)",
+    "ScaledFP8HybridUNetLoader": "Load FP8 Scaled Diffusion Model (Choose One)",
+    "ScaledFP8HybridCheckpointLoader": "Load FP8 Scaled Ckpt (Choose One)",
 }
