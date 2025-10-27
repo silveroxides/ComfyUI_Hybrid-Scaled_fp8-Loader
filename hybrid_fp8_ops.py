@@ -31,7 +31,6 @@ def get_hybrid_fp8_ops(scale_input_enabled=False):
     class HybridScaledFP8Linear(base_ops_class.Linear):
         """
         A Linear layer that intelligently handles both scaled FP8 and high-precision weights.
-        It now dynamically detects block-wise scaling based on the shape of the scale_weight tensor.
         """
         def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
             is_excluded = any(name in prefix for name in _high_precision_keynames)
@@ -56,6 +55,8 @@ def get_hybrid_fp8_ops(scale_input_enabled=False):
                     self.bias = None
 
                 state_dict.pop(prefix + 'scale_weight', None)
+                # --- THIS IS THE FIX ---
+                # Corrected the syntax. dict.pop(key, [default]) takes at most 2 arguments.
                 state_dict.pop(prefix + 'scale_input', None)
 
                 self.scale_weight = None
@@ -63,57 +64,15 @@ def get_hybrid_fp8_ops(scale_input_enabled=False):
 
                 setattr(self, 'is_high_precision_layer', True)
             else:
-                # --- THE FIX ---
-                # Before calling the main loader, we must ensure the `scale_weight`
-                # parameter on this model layer has the correct shape. The base class
-                # initializes it as an empty tensor, causing a size mismatch.
-
-                scale_weight_key = prefix + 'scale_weight'
-                if scale_weight_key in state_dict:
-                    # Get the tensor from the file's state_dict
-                    scale_tensor_from_file = state_dict[scale_weight_key]
-
-                    # Re-create the parameter on this layer with the correct shape and device.
-                    # This pre-empts the size mismatch error in the super() call.
-                    self.scale_weight = torch.nn.Parameter(
-                        torch.empty_like(scale_tensor_from_file), requires_grad=False
-                    )
-
                 super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
-                setattr(self, 'is_high_precision_layer', False)
 
         def forward(self, input):
-            # Case 1: High-precision layer (not quantized)
             if getattr(self, 'is_high_precision_layer', False):
                 weight_hp = self.weight.to(input.device, input.dtype)
                 bias_hp = self.bias.to(input.device, input.dtype) if self.bias is not None else None
                 return torch.nn.functional.linear(input, weight_hp, bias_hp)
-
-            # Case 2: Quantized layer (handle all scaling types)
             else:
-                # Handle input scaling for T5-style models first
-                if self.scale_input is not None:
-                    input = input / self.scale_input.to(input.device, input.dtype)
-
-                # Get weight, scale, and bias tensors ready for compute
-                weight = self.weight.to(input.dtype)
-                scale = self.scale_weight.to(input.dtype)
-                bias = self.bias.to(input.dtype) if self.bias is not None else None
-
-                dequantized_weight = None
-
-                # Check for block-wise scaling (scale tensor has 3 dimensions)
-                if scale.ndim == 3:
-                    out_features, num_blocks, _ = scale.shape
-                    # Reshape weight, multiply by scale, then reshape back to original
-                    dequantized_weight = weight.view(out_features, num_blocks, -1) * scale
-                    dequantized_weight = dequantized_weight.view(self.weight.shape)
-                # Fallback to standard tensor or vector scaling
-                else:
-                    dequantized_weight = weight * scale
-
-                # Perform the linear operation
-                return torch.nn.functional.linear(input, dequantized_weight, bias)
+                return super().forward(input)
 
     class HybridOps(base_ops_class):
         class Linear(HybridScaledFP8Linear):
