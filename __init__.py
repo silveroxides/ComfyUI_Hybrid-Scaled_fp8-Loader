@@ -11,6 +11,8 @@ NERF_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "img_in_patch", "nerf_b
 DISTILL_LAYER_KEYNAMES_SMALL = ["distilled_guidance_layer"]
 NERF_LAYER_KEYNAMES_SMALL = ["distilled_guidance_layer", "img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder"]
 WAN_LAYER_KEYNAMES = ["patch_embedding", "text_embedding", "time_embedding", "time_projection", "head.head"]
+PONYV7_LAYER_KEYNAMES = ["t_embedder", "cond_seq_linear", "final_linear", "init_x_linear", "modF", "positional_encoding", "register_tokens"]
+
 
 def detect_fp8_optimizations(model_path):
     """
@@ -30,7 +32,7 @@ def detect_fp8_optimizations(model_path):
     print("[Hybrid FP8 Loader] Standard UNet-style model detected (scale_input disabled).")
     return False
 
-def setup_hybrid_ops(model_path, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan):
+def setup_hybrid_ops(model_path, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan, pony_diffusion_v7):
     """A helper function to configure the hybrid ops based on user settings and model type."""
     excluded_layers = []
     if chroma_hybrid_large: excluded_layers.extend(DISTILL_LAYER_KEYNAMES_LARGE)
@@ -38,6 +40,7 @@ def setup_hybrid_ops(model_path, chroma_hybrid_large, radiance_hybrid_large, chr
     if chroma_hybrid_small: excluded_layers.extend(DISTILL_LAYER_KEYNAMES_SMALL)
     if radiance_hybrid_small: excluded_layers.extend(NERF_LAYER_KEYNAMES_SMALL)
     if wan: excluded_layers.extend(WAN_LAYER_KEYNAMES)
+    if pony_diffusion_v7: excluded_layers.extend(PONYV7_LAYER_KEYNAMES)
 
     hybrid_fp8_ops.set_high_precision_keynames(list(set(excluded_layers)))
 
@@ -57,6 +60,7 @@ class ScaledFP8HybridUNetLoader:
                 "chroma_hybrid_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller Chroma hybrid models. LoRA should no longer be an issue"}),
                 "radiance_hybrid_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller Radiance hybrid models. LoRA should no longer be an issue"}),
                 "wan": ("BOOLEAN", {"default": False, "tooltip": "for selective fp8_scaled quantization of WAN 2.2 models"}),
+                "pony_diffusion_v7": ("BOOLEAN", {"default": False, "tooltip": "for selective fp8_scaled quantization of PonyDiffusion V7"}),
             }
         }
 
@@ -64,9 +68,9 @@ class ScaledFP8HybridUNetLoader:
     FUNCTION = "load_unet"
     CATEGORY = "loaders/FP8"
 
-    def load_unet(self, model_name, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan):
+    def load_unet(self, model_name, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan, pony_diffusion_v7):
         unet_path = folder_paths.get_full_path("unet", model_name)
-        ops = setup_hybrid_ops(unet_path, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan)
+        ops = setup_hybrid_ops(unet_path, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan, pony_diffusion_v7)
         model = comfy.sd.load_diffusion_model(unet_path, model_options={"custom_operations": ops})
         return (model,)
 
@@ -81,6 +85,7 @@ class ScaledFP8HybridCheckpointLoader:
                 "chroma_hybrid_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller Chroma hybrid models. LoRA should no longer be an issue"}),
                 "radiance_hybrid_small": ("BOOLEAN", {"default": False, "tooltip": "Use only with the smaller Radiance hybrid models. LoRA should no longer be an issue"}),
                 "wan": ("BOOLEAN", {"default": False, "tooltip": "for selective fp8_scaled quantization of WAN 2.2 models"}),
+                "pony_diffusion_v7": ("BOOLEAN", {"default": False, "tooltip": "for selective fp8_scaled quantization of PonyDiffusion V7"}),
             }
         }
 
@@ -88,9 +93,9 @@ class ScaledFP8HybridCheckpointLoader:
     FUNCTION = "load_checkpoint"
     CATEGORY = "loaders/FP8"
 
-    def load_checkpoint(self, ckpt_name, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan):
+    def load_checkpoint(self, ckpt_name, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan, pony_diffusion_v7):
         ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
-        ops = setup_hybrid_ops(ckpt_path, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan)
+        ops = setup_hybrid_ops(ckpt_path, chroma_hybrid_large, radiance_hybrid_large, chroma_hybrid_small, radiance_hybrid_small, wan, pony_diffusion_v7)
         out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"), model_options={"custom_operations": ops})
         return out[:3]
 
