@@ -10,7 +10,12 @@ DISTILL_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "final_layer", "img_
 NERF_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder", "txt_in"]
 DISTILL_LAYER_KEYNAMES_SMALL = ["distilled_guidance_layer"]
 NERF_LAYER_KEYNAMES_SMALL = ["distilled_guidance_layer", "img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder"]
-WAN_LAYER_KEYNAMES = ["patch_embedding", "text_embedding", "time_embedding", "time_projection", "head.head"]
+WAN_LAYER_KEYNAMES = [
+    "patch_embedding", "ref_conv", "control_adapter", "motion_encoder.enc.net_app",
+    "face_encoder.conv", "pose_patch_embedding", "text_embedding", "time_embedding",
+    "time_projection", "head.head", "img_emb.proj", "motion_encoder.dec",
+    "motion_encoder.enc.fc", "face_encoder.out_proj", "face_adapter"
+]
 PONYV7_LAYER_KEYNAMES = ["t_embedder", "cond_seq_linear", "final_linear", "init_x_linear", "modF", "positional_encoding", "register_tokens"]
 
 
