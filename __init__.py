@@ -60,7 +60,7 @@ class ScaledFP8HybridUNetLoader:
         return {
             "required": {
                 "model_name": (folder_paths.get_filename_list("unet"), ),
-                "model_type": (["chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7"], {"default": "chroma_hybrid_large"}),
+                "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7"], {"default": "none"}),
             }
         }
 
@@ -80,7 +80,7 @@ class ScaledFP8HybridCheckpointLoader:
         return {
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
-                "model_type": (["chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7"], {"default": "chroma_hybrid_large"}),
+                "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7"], {"default": "none"}),
             }
         }
 
