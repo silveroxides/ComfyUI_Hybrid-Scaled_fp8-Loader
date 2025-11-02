@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI_Hybrid-Scaled_fp8-Loader"
 description = 'Custom Loader for scaled_fp8 models with hybrid precision layers.'
-version = "0.2.1"
+version = "0.2.2"
 license = { file = "LICENSE" }
 
 [project.urls]
