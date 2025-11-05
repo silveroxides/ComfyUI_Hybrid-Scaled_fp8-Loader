@@ -1,11 +1,9 @@
-# file: ComfyUI/custom_nodes/HybridFP8Loader/__init__.py
-
 import folder_paths
 import comfy.sd
 from safetensors import safe_open
 from . import hybrid_fp8_ops
+from . import ramtorch_ops
 
-# --- Exclusion Lists ---
 DISTILL_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "final_layer", "img_in", "txt_in"]
 NERF_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder", "txt_in"]
 DISTILL_LAYER_KEYNAMES_SMALL = ["distilled_guidance_layer"]
@@ -49,10 +47,12 @@ def setup_hybrid_ops(model_path, model_type):
 
     hybrid_fp8_ops.set_high_precision_keynames(list(set(excluded_layers)))
 
-    # --- THIS IS THE KEY LOGIC ---
-    # Detect model type from the file and pass the correct flag to get_hybrid_fp8_ops
     scale_input_enabled = detect_fp8_optimizations(model_path)
     return hybrid_fp8_ops.get_hybrid_fp8_ops(scale_input_enabled=scale_input_enabled)
+
+def setup_ramtorch_ops():
+    print("[RamTorch Loader] Setting up RamTorch operations for model loading.")
+    return ramtorch_ops.get_ramtorch_ops()
 
 class ScaledFP8HybridUNetLoader:
     @classmethod
@@ -94,11 +94,45 @@ class ScaledFP8HybridCheckpointLoader:
         out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"), model_options={"custom_operations": ops})
         return out[:3]
 
+class RamTorchUNetLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {"model_name": (folder_paths.get_filename_list("unet"), )}}
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_unet"
+    CATEGORY = "loaders/RamTorch"
+
+    def load_unet(self, model_name):
+        unet_path = folder_paths.get_full_path("unet", model_name)
+        ops = setup_ramtorch_ops()
+        model = comfy.sd.load_diffusion_model(unet_path, model_options={"custom_operations": ops})
+        return (model,)
+
+class RamTorchCheckpointLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {"ckpt_name": (folder_paths.get_filename_list("checkpoints"), )}}
+    RETURN_TYPES = ("MODEL", "CLIP", "VAE")
+    FUNCTION = "load_checkpoint"
+    CATEGORY = "loaders/RamTorch"
+
+    def load_checkpoint(self, ckpt_name):
+        ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
+        ops = setup_ramtorch_ops()
+        out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"), model_options={"custom_operations": ops})
+        return out[:3]
+
+
 NODE_CLASS_MAPPINGS = {
     "ScaledFP8HybridUNetLoader": ScaledFP8HybridUNetLoader,
     "ScaledFP8HybridCheckpointLoader": ScaledFP8HybridCheckpointLoader,
+    "RamTorchUNetLoader": RamTorchUNetLoader,
+    "RamTorchCheckpointLoader": RamTorchCheckpointLoader,
 }
+
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ScaledFP8HybridUNetLoader": "Load FP8 Scaled Diffusion Model (Choose One)",
-    "ScaledFP8HybridCheckpointLoader": "Load FP8 Scaled Ckpt (Choose One)",
+    "ScaledFP8HybridUNetLoader": "Load FP8 Scaled UNet",
+    "ScaledFP8HybridCheckpointLoader": "Load FP8 Scaled Checkpoint",
+    "RamTorchUNetLoader": "Load UNet (RamTorch)",
+    "RamTorchCheckpointLoader": "Load Checkpoint (RamTorch)",
 }
