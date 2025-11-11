@@ -17,7 +17,7 @@ WAN_LAYER_KEYNAMES = [
     "motion_encoder.enc.fc", "face_encoder.out_proj", "face_adapter"
 ]
 PONYV7_LAYER_KEYNAMES = ["t_embedder", "cond_seq_linear", "final_linear", "init_x_linear", "modF", "positional_encoding", "register_tokens"]
-
+QWEN_LAYER_KEYNAMES = ["time_text_embed", "img_in", "norm_out", "proj_out", "txt_in", "norm_added_k", "norm_added_q", "norm_k", "norm_q", "txt_norm"]
 
 def detect_fp8_optimizations(model_path):
     """
@@ -39,20 +39,34 @@ def detect_fp8_optimizations(model_path):
 
 def setup_hybrid_ops(model_path, model_type):
     """A helper function to configure the hybrid ops based on user settings and model type."""
+    disable_fp8_mat_mult = False
     excluded_layers = []
-    if model_type == "chroma_hybrid_large": excluded_layers.extend(DISTILL_LAYER_KEYNAMES_LARGE)
-    if model_type == "radiance_hybrid_large": excluded_layers.extend(NERF_LAYER_KEYNAMES_LARGE)
-    if model_type == "chroma_hybrid_small": excluded_layers.extend(DISTILL_LAYER_KEYNAMES_SMALL)
-    if model_type == "radiance_hybrid_small": excluded_layers.extend(NERF_LAYER_KEYNAMES_SMALL)
-    if model_type == "wan": excluded_layers.extend(WAN_LAYER_KEYNAMES)
-    if model_type == "pony_diffusion_v7": excluded_layers.extend(PONYV7_LAYER_KEYNAMES)
+    if model_type == "chroma_hybrid_large":
+        excluded_layers.extend(DISTILL_LAYER_KEYNAMES_LARGE)
+    if model_type == "radiance_hybrid_large":
+        excluded_layers.extend(NERF_LAYER_KEYNAMES_LARGE)
+    if model_type == "chroma_hybrid_small":
+        excluded_layers.extend(DISTILL_LAYER_KEYNAMES_SMALL)
+    if model_type == "radiance_hybrid_small":
+        excluded_layers.extend(NERF_LAYER_KEYNAMES_SMALL)
+    if model_type == "wan":
+        excluded_layers.extend(WAN_LAYER_KEYNAMES)
+    if model_type == "pony_diffusion_v7":
+        excluded_layers.extend(PONYV7_LAYER_KEYNAMES)
+    if model_type == "qwen":
+        excluded_layers.extend(QWEN_LAYER_KEYNAMES)
+        disable_fp8_mat_mult = True
 
     hybrid_fp8_ops.set_high_precision_keynames(list(set(excluded_layers)))
 
     # --- THIS IS THE KEY LOGIC ---
     # Detect model type from the file and pass the correct flag to get_hybrid_fp8_ops
     scale_input_enabled = detect_fp8_optimizations(model_path)
+<<<<<<< Updated upstream
     return hybrid_fp8_ops.get_hybrid_fp8_ops(scale_input_enabled=scale_input_enabled)
+=======
+    return hybrid_fp8_ops.get_hybrid_fp8_ops(scale_input_enabled=scale_input_enabled, disable_fp8_mat_mult=disable_fp8_mat_mult)
+>>>>>>> Stashed changes
 
 class ScaledFP8HybridUNetLoader:
     @classmethod
@@ -60,7 +74,7 @@ class ScaledFP8HybridUNetLoader:
         return {
             "required": {
                 "model_name": (folder_paths.get_filename_list("unet"), ),
-                "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7"], {"default": "none"}),
+                "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7", "qwen"], {"default": "none"}),
             }
         }
 
@@ -80,7 +94,7 @@ class ScaledFP8HybridCheckpointLoader:
         return {
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
-                "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7"], {"default": "none"}),
+                "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7", "qwen"], {"default": "none"}),
             }
         }
 
