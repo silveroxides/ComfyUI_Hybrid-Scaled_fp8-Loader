@@ -62,11 +62,7 @@ def setup_hybrid_ops(model_path, model_type):
     # --- THIS IS THE KEY LOGIC ---
     # Detect model type from the file and pass the correct flag to get_hybrid_fp8_ops
     scale_input_enabled = detect_fp8_optimizations(model_path)
-<<<<<<< Updated upstream
-    return hybrid_fp8_ops.get_hybrid_fp8_ops(scale_input_enabled=scale_input_enabled)
-=======
     return hybrid_fp8_ops.get_hybrid_fp8_ops(scale_input_enabled=scale_input_enabled, disable_fp8_mat_mult=disable_fp8_mat_mult)
->>>>>>> Stashed changes
 
 class ScaledFP8HybridUNetLoader:
     @classmethod
