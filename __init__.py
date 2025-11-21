@@ -37,6 +37,28 @@ def detect_fp8_optimizations(model_path):
     print("[Hybrid FP8 Loader] Standard UNet-style model detected (scale_input disabled).")
     return False
 
+def detect_blockwise(model_path, excluded_layers):
+    """
+    Peeks into the safetensors file to check the shape of a 'scale_weight' tensor.
+    Returns True if it is a 3D tensor and blockwise scaling should be enabled, False otherwise.
+    """
+    try:
+        with safe_open(model_path, framework="pt", device="cpu") as f:
+            for key in f.keys():
+                if key.endswith(".scale_weight"):
+                    if any(excluded in key for excluded in excluded_layers):
+                        continue
+
+                    scale_weight = f.get_tensor(key)
+                    if scale_weight.ndim == 3:
+                        print("[Hybrid FP8 Loader] Blockwise scaled model detected (is_blockwise enabled).")
+                        return True
+    except Exception as e:
+        print(f"[Hybrid FP8 Loader] Warning: Could not inspect model file to determine scaling type: {e}")
+
+    print("[Hybrid FP8 Loader] Standard tensor scaled model detected (is_blockwise disabled).")
+    return False
+
 def setup_hybrid_ops(model_path, model_type):
     """A helper function to configure the hybrid ops based on user settings and model type."""
     disable_fp8_mat_mult = False
@@ -62,7 +84,13 @@ def setup_hybrid_ops(model_path, model_type):
     # --- THIS IS THE KEY LOGIC ---
     # Detect model type from the file and pass the correct flag to get_hybrid_fp8_ops
     scale_input_enabled = detect_fp8_optimizations(model_path)
-    return hybrid_fp8_ops.get_hybrid_fp8_ops(scale_input_enabled=scale_input_enabled, disable_fp8_mat_mult=disable_fp8_mat_mult)
+    is_blockwise = detect_blockwise(model_path, excluded_layers)
+
+    return hybrid_fp8_ops.get_hybrid_fp8_ops(
+        scale_input_enabled=scale_input_enabled,
+        is_blockwise=is_blockwise,
+        disable_fp8_mat_mult=disable_fp8_mat_mult
+    )
 
 class ScaledFP8HybridUNetLoader:
     @classmethod
