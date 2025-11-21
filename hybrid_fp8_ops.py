@@ -13,14 +13,17 @@ def set_high_precision_keynames(keynames):
     _high_precision_keynames = keynames
     print(f"[Hybrid FP8 Ops] High precision keynames set: {keynames}")
 
-def get_hybrid_fp8_ops(scale_input_enabled=False):
+def get_hybrid_fp8_ops(scale_input_enabled=False, disable_fp8_mat_mult=False):
     """
     Dynamically creates and returns a hybrid operations class.
     The 'scale_input_enabled' flag is now passed in from the loader.
     """
     print(f"[Hybrid FP8 Ops] Configuring with scale_input_enabled: {scale_input_enabled}")
 
-    fp8_mat_mult_supported = comfy.model_management.supports_fp8_compute()
+    if disable_fp8_mat_mult == False:
+       fp8_mat_mult_supported = comfy.model_management.supports_fp8_compute()
+    else:
+        fp8_mat_mult_supported = False
 
     base_ops_class = comfy.ops.scaled_fp8_ops(
         fp8_matrix_mult=fp8_mat_mult_supported,
