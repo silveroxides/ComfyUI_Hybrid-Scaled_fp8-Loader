@@ -18,6 +18,7 @@ WAN_LAYER_KEYNAMES = [
 ]
 PONYV7_LAYER_KEYNAMES = ["t_embedder", "cond_seq_linear", "final_linear", "init_x_linear", "modF", "positional_encoding", "register_tokens"]
 QWEN_LAYER_KEYNAMES = ["time_text_embed", "img_in", "norm_out", "proj_out", "txt_in", "norm_added_k", "norm_added_q", "norm_k", "norm_q", "txt_norm"]
+HUNYUAN_LAYER_KEYNAMES = ["layernorm", "img_attn_k_norm", "img_attn_q_norm", "txt_attn_k_norm", "txt_attn_q_norm", "norm1", "norm2", "vision_in.proj.0", "vision_in.proj.4", "img_in.proj", "cond_type_embedding"]
 
 def detect_fp8_optimizations(model_path):
     """
@@ -56,6 +57,8 @@ def setup_hybrid_ops(model_path, model_type):
     if model_type == "qwen":
         excluded_layers.extend(QWEN_LAYER_KEYNAMES)
         disable_fp8_mat_mult = True
+    if model_type == "hunyuan":
+        excluded_layers.extend(HUNYUAN_LAYER_KEYNAMES)
 
     hybrid_fp8_ops.set_high_precision_keynames(list(set(excluded_layers)))
 
@@ -70,7 +73,7 @@ class ScaledFP8HybridUNetLoader:
         return {
             "required": {
                 "model_name": (folder_paths.get_filename_list("unet"), ),
-                "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7", "qwen"], {"default": "none"}),
+                "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7", "qwen", "hunyuan"], {"default": "none"}),
             }
         }
 
@@ -90,7 +93,7 @@ class ScaledFP8HybridCheckpointLoader:
         return {
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
-                "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7", "qwen"], {"default": "none"}),
+                "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7", "qwen", "hunyuan"], {"default": "none"}),
             }
         }
 
