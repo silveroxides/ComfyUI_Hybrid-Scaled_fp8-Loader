@@ -21,53 +21,73 @@ QWEN_LAYER_KEYNAMES = ["time_text_embed", "img_in", "norm_out", "proj_out", "txt
 HUNYUAN_LAYER_KEYNAMES = ["layernorm", "img_attn_k_norm", "img_attn_q_norm", "txt_attn_k_norm", "txt_attn_q_norm", "norm1", "norm2", "vision_in.proj.0", "vision_in.proj.4", "img_in.proj", "cond_type_embedding"]
 ZIMAGE_LAYER_KEYNAMES = ["cap_embedder.0", "attention_norm1", "attention_norm2", "ffn_norm1", "ffn_norm2", "norm_k", "norm_q", "norm1", "norm2"]
 
-def detect_fp8_optimizations(model_path):
+
+def detect_fp8_optimizations_and_dtype(model_path, excluded_layers_substrings):
     """
-    Peeks into the safetensors file to check the shape of 'scaled_fp8' tensor.
-    Returns True if input scaling should be enabled, False otherwise.
+    Peeks into the safetensors file.
+    1. Determines if it is scale_input enabled.
+    2. Finds specific layers matching 'excluded_layers_substrings' and records their native dtype.
     """
+    scale_input = False
+    excluded_layers_dtype = {}
+
     try:
         with safe_open(model_path, framework="pt", device="cpu") as f:
-            if "scaled_fp8" in f.keys():
+            all_keys = f.keys()
+
+            for key in all_keys:
+                for substring in excluded_layers_substrings:
+                    if substring in key:
+                        tensor = f.get_tensor(key)
+                        excluded_layers_dtype[key] = tensor.dtype
+                        # Break inner loop to avoid adding same key twice if multiple substrings match
+                        break
+
+            if "scaled_fp8" in all_keys:
                 scaled_fp8_tensor = f.get_tensor("scaled_fp8")
                 if scaled_fp8_tensor.shape[0] == 0:
                     print("[Hybrid FP8 Loader] Scale Input model detected (scale_input enabled).")
-                    return True
+                    scale_input = True
+                else:
+                    print("[Hybrid FP8 Loader] Standard UNet-style model detected (scale_input disabled).")
     except Exception as e:
-        print(f"[Hybrid FP8 Loader] Warning: Could not inspect model file to determine FP8 type: {e}")
+        print(f"[Hybrid FP8 Loader] Warning: Could not inspect model file: {e}")
 
-    print("[Hybrid FP8 Loader] Standard UNet-style model detected (scale_input disabled).")
-    return False
+    return scale_input, excluded_layers_dtype
+
 
 def setup_hybrid_ops(model_path, model_type):
     """A helper function to configure the hybrid ops based on user settings and model type."""
     disable_fp8_mat_mult = False
     excluded_layers = []
+
     if model_type == "chroma_hybrid_large":
         excluded_layers.extend(DISTILL_LAYER_KEYNAMES_LARGE)
-    if model_type == "radiance_hybrid_large":
+    elif model_type == "radiance_hybrid_large":
         excluded_layers.extend(NERF_LAYER_KEYNAMES_LARGE)
-    if model_type == "chroma_hybrid_small":
+    elif model_type == "chroma_hybrid_small":
         excluded_layers.extend(DISTILL_LAYER_KEYNAMES_SMALL)
-    if model_type == "radiance_hybrid_small":
+    elif model_type == "radiance_hybrid_small":
         excluded_layers.extend(NERF_LAYER_KEYNAMES_SMALL)
-    if model_type == "wan":
+    elif model_type == "wan":
         excluded_layers.extend(WAN_LAYER_KEYNAMES)
-    if model_type == "pony_diffusion_v7":
+    elif model_type == "pony_diffusion_v7":
         excluded_layers.extend(PONYV7_LAYER_KEYNAMES)
-    if model_type == "qwen":
+    elif model_type == "qwen":
         excluded_layers.extend(QWEN_LAYER_KEYNAMES)
         disable_fp8_mat_mult = True
-    if model_type == "hunyuan":
+    elif model_type == "hunyuan":
         excluded_layers.extend(HUNYUAN_LAYER_KEYNAMES)
-    if model_type == "zimage":
+    elif model_type == "zimage":
         excluded_layers.extend(ZIMAGE_LAYER_KEYNAMES)
 
-    hybrid_fp8_ops.set_high_precision_keynames(list(set(excluded_layers)))
+    # Use set to remove duplicate substrings
+    high_precision_substrings = list(set(excluded_layers))
 
-    # --- THIS IS THE KEY LOGIC ---
-    # Detect model type from the file and pass the correct flag to get_hybrid_fp8_ops
-    scale_input_enabled = detect_fp8_optimizations(model_path)
+    scale_input_enabled, excluded_layers_dtype = detect_fp8_optimizations_and_dtype(model_path, high_precision_substrings)
+
+    hybrid_fp8_ops.set_high_precision_keys(excluded_layers_dtype)
+
     return hybrid_fp8_ops.get_hybrid_fp8_ops(scale_input_enabled=scale_input_enabled, disable_fp8_mat_mult=disable_fp8_mat_mult)
 
 class ScaledFP8HybridUNetLoader:
