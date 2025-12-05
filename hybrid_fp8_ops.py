@@ -2,7 +2,8 @@
 
 import torch
 import comfy.ops
-from comfy.ops import manual_cast, fp8_linear, cast_bias_weight, uncast_bias_weight
+from comfy.ops import manual_cast, cast_bias_weight, uncast_bias_weight
+from comfy.quant_ops import QuantizedTensor
 import comfy.model_management
 import logging
 
@@ -15,6 +16,47 @@ def set_high_precision_keys(key_dtype_map):
     global _high_precision_keys
     _high_precision_keys = key_dtype_map
     print(f"[Hybrid FP8 Ops] High precision overrides set for {len(key_dtype_map)} layers.")
+
+def fp8_linear(self, input):
+    """
+    Legacy FP8 linear function for backward compatibility.
+    Uses QuantizedTensor subclass for dispatch.
+    """
+    dtype = self.weight.dtype
+    if dtype not in [torch.float8_e4m3fn]:
+        return None
+
+    input_dtype = input.dtype
+
+    if input.ndim == 3 or input.ndim == 2:
+        w, bias, offload_stream = cast_bias_weight(self, input, dtype=dtype, bias_dtype=input_dtype, offloadable=True)
+
+        scale_weight = self.scale_weight
+        scale_input = self.scale_input
+        if scale_weight is None:
+            scale_weight = torch.ones((), device=input.device, dtype=torch.float32)
+        else:
+            scale_weight = scale_weight.to(input.device)
+
+        if scale_input is None:
+            scale_input = torch.ones((), device=input.device, dtype=torch.float32)
+            input = torch.clamp(input, min=-448, max=448, out=input)
+            layout_params_weight = {'scale': scale_input, 'orig_dtype': input_dtype}
+            quantized_input = QuantizedTensor(input.to(dtype).contiguous(), "TensorCoreFP8Layout", layout_params_weight)
+        else:
+            scale_input = scale_input.to(input.device)
+            quantized_input = QuantizedTensor.from_float(input, "TensorCoreFP8Layout", scale=scale_input, dtype=dtype)
+
+        # Wrap weight in QuantizedTensor - this enables unified dispatch
+        # Call F.linear - __torch_dispatch__ routes to fp8_linear handler in quant_ops.py!
+        layout_params_weight = {'scale': scale_weight, 'orig_dtype': input_dtype}
+        quantized_weight = QuantizedTensor(w, "TensorCoreFP8Layout", layout_params_weight)
+        o = torch.nn.functional.linear(quantized_input, quantized_weight, bias)
+
+        uncast_bias_weight(self, w, bias, offload_stream)
+        return o
+
+    return None
 
 
 def get_hybrid_fp8_ops(scale_input_enabled=False, disable_fp8_mat_mult=False):
