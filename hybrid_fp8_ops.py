@@ -122,15 +122,20 @@ def get_hybrid_fp8_ops(scale_input_enabled=False, disable_fp8_mat_mult=False):
             def convert_weight(self, weight, inplace=False, **kwargs):
                 # If this is a high precision layer, scale_weight is None.
                 # We simply return the weight as-is.
-                if not hasattr(self, 'scale_weight'):
+                if self.scale_weight is None:
                     self.scale_weight = torch.nn.parameter.Parameter(data=torch.ones((), device=self.weight.device, dtype=torch.float32), requires_grad=False)
-
-                # FP8 Logic
-                if inplace:
-                    weight *= self.scale_weight.to(device=weight.device, dtype=weight.dtype)
-                    return weight
+                    # FP8 Logic
+                    if inplace:
+                        weight *= self.scale_weight.to(device=weight.device, dtype=weight.dtype)
+                        return weight
+                    else:
+                        return weight.to(dtype=torch.float32) * self.scale_weight.to(device=weight.device, dtype=torch.float32)
                 else:
-                    return weight.to(dtype=torch.float32) * self.scale_weight.to(device=weight.device, dtype=torch.float32)
+                    if inplace:
+                        weight *= self.scale_weight.to(device=weight.device, dtype=weight.dtype)
+                        return weight
+                    else:
+                        return weight.to(dtype=torch.float32) * self.scale_weight.to(device=weight.device, dtype=torch.float32)
 
             def set_weight(self, weight, inplace_update=False, seed=None, return_weight=False, **kwargs):
                 # If this is a high precision layer, scale_weight is None.
