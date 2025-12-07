@@ -10,13 +10,13 @@ class HybridConfigNode:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "force_fp8_matmul": ("BOOLEAN", {"default": False}),
-                "metadata_debug": ("BOOLEAN", {"default": False}),
-                "guard_header_only": ("BOOLEAN", {"default": False}),
-                "log_high_precision": ("BOOLEAN", {"default": False}),
-                "benchmark": ("BOOLEAN", {"default": False}),
-                "worker_override": ("BOOLEAN", {"default": False}),
-                "worker_count": ("INT", {"default": 2, "min": 1, "max": 16}),
+                "force_fp8_matmul": ("BOOLEAN", {"default": False, "tooltip": "Force FP8 matrix multiplications even if not detected in metadata"}),
+                "metadata_debug": ("BOOLEAN", {"default": False, "tooltip": "Enable detailed logging of metadata during model inspection"}),
+                "guard_header_only": ("BOOLEAN", {"default": False, "tooltip": "Only read metadata headers without loading any tensors"}),
+                "log_high_precision": ("BOOLEAN", {"default": False, "tooltip": "Log when high-precision tensors are used instead of FP8"}),
+                "mmap": ("BOOLEAN", {"default": False, "tooltip": "Enable mmap-backed state dict loading"}),
+                "worker_override": ("BOOLEAN", {"default": False, "tooltip": "Override default worker count for state dict loading"}),
+                "worker_count": ("INT", {"default": 2, "min": 1, "max": 16, "tooltip": "Number of worker threads for state dict loading"}),
             }
         }
 
@@ -25,13 +25,13 @@ class HybridConfigNode:
     FUNCTION = "configure"
     CATEGORY = "loaders/FP8"
 
-    def configure(self, force_fp8_matmul, metadata_debug, guard_header_only, log_high_precision, benchmark, worker_override, worker_count):
+    def configure(self, force_fp8_matmul, metadata_debug, guard_header_only, log_high_precision, mmap, worker_override, worker_count):
         config = {
             "force_fp8_matmul": force_fp8_matmul,
             "metadata_debug": metadata_debug,
             "guard_header_only": guard_header_only,
             "log_high_precision": log_high_precision,
-            "benchmark": benchmark,
+            "mmap": mmap,
             "worker_override": worker_override,
             "worker_count": worker_count,
         }
@@ -44,10 +44,10 @@ class ScaledFP8HybridUNetLoader:
         return {
             "required": {
                 "model_name": (folder_paths.get_filename_list("unet"), ),
-                "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7", "qwen", "hunyuan", "zimage"], {"default": "none"}),
+                "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7", "qwen", "hunyuan", "zimage"], {"default": "none", "tooltip": "Type of the model to load for proper FP8 handling"}),
             },
             "optional": {
-                "hybrid_config": ("HYBRID_CONFIG",),
+                "hybrid_config": ("HYBRID_CONFIG",{"tooltip": "Hybrid FP8 configuration from Hybrid Config node"}),
             }
         }
 
@@ -63,7 +63,7 @@ class ScaledFP8HybridUNetLoader:
             metadata_debug = False
             guard_header_only = False
             log_high_precision = False
-            benchmark = False
+            mmap = False
             worker_override = False
             worker_count = 2
         else:
@@ -71,7 +71,7 @@ class ScaledFP8HybridUNetLoader:
             metadata_debug = hybrid_config.get("metadata_debug", False)
             guard_header_only = hybrid_config.get("guard_header_only", False)
             log_high_precision = hybrid_config.get("log_high_precision", False)
-            benchmark = hybrid_config.get("benchmark", False)
+            mmap = hybrid_config.get("mmap", False)
             worker_override = hybrid_config.get("worker_override", False)
             worker_count = hybrid_config.get("worker_count", 2)
         hybrid_fp8_ops.configure_hybrid_ops(
@@ -82,8 +82,8 @@ class ScaledFP8HybridUNetLoader:
             guard_no_tensor_read=guard_header_only,
             log_high_precision=log_high_precision,
         )
-        # Toggle mmap-backed state dict loading based on benchmark flag
-        hybrid_fp8_ops.set_state_dict_mmap(benchmark)
+        # Toggle mmap-backed state dict loading based on mmap flag
+        hybrid_fp8_ops.set_state_dict_mmap(mmap)
         hybrid_fp8_ops.set_state_dict_workers(worker_count, worker_override)
         # Lazy-load state dict via safetensors and use load_diffusion_model_state_dict
         sd, metadata = hybrid_fp8_ops.load_unet_lazy(unet_path)
