@@ -2,93 +2,41 @@
 
 import folder_paths
 import comfy.sd
-from safetensors import safe_open
 from . import hybrid_fp8_ops
 
-# --- Exclusion Lists ---
-DISTILL_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "final_layer", "img_in", "txt_in"]
-NERF_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder", "txt_in"]
-DISTILL_LAYER_KEYNAMES_SMALL = ["distilled_guidance_layer"]
-NERF_LAYER_KEYNAMES_SMALL = ["distilled_guidance_layer", "img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder"]
-WAN_LAYER_KEYNAMES = [
-    "patch_embedding", "ref_conv", "control_adapter", "motion_encoder.enc.net_app",
-    "face_encoder.conv", "pose_patch_embedding", "text_embedding", "time_embedding",
-    "time_projection", "head.head", "img_emb.proj", "motion_encoder.dec",
-    "motion_encoder.enc.fc", "face_encoder.out_proj", "face_adapter"
-]
-PONYV7_LAYER_KEYNAMES = ["t_embedder", "cond_seq_linear", "final_linear", "init_x_linear", "modF", "positional_encoding", "register_tokens"]
-QWEN_LAYER_KEYNAMES = ["time_text_embed", "img_in", "norm_out", "proj_out", "txt_in", "norm_added_k", "norm_added_q", "norm_k", "norm_q", "txt_norm"]
-HUNYUAN_LAYER_KEYNAMES = ["layernorm", "img_attn_k_norm", "img_attn_q_norm", "txt_attn_k_norm", "txt_attn_q_norm", "norm1", "norm2", "vision_in.proj.0", "vision_in.proj.4", "img_in.proj", "cond_type_embedding"]
-ZIMAGE_LAYER_KEYNAMES = ["cap_embedder.0", "attention_norm1", "attention_norm2", "ffn_norm1", "ffn_norm2", "norm_k", "norm_q", "norm1", "norm2"]
 
+class HybridConfigNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "force_fp8_matmul": ("BOOLEAN", {"default": False, "tooltip": "Force FP8 matrix multiplications even if not detected in metadata"}),
+                "metadata_debug": ("BOOLEAN", {"default": False, "tooltip": "Enable detailed logging of metadata during model inspection"}),
+                "guard_header_only": ("BOOLEAN", {"default": False, "tooltip": "Only read metadata headers without loading any tensors"}),
+                "log_high_precision": ("BOOLEAN", {"default": False, "tooltip": "Log when high-precision tensors are used instead of FP8"}),
+                "mmap": ("BOOLEAN", {"default": False, "tooltip": "Enable mmap-backed state dict loading"}),
+                "worker_override": ("BOOLEAN", {"default": False, "tooltip": "Override default worker count for state dict loading"}),
+                "worker_count": ("INT", {"default": 2, "min": 1, "max": 16, "tooltip": "Number of worker threads for state dict loading"}),
+            }
+        }
 
-def detect_fp8_optimizations_and_dtype(model_path, excluded_layers_substrings):
-    """
-    Peeks into the safetensors file.
-    1. Determines if it is scale_input enabled.
-    2. Finds specific layers matching 'excluded_layers_substrings' and records their native dtype.
-    """
-    scale_input = False
-    excluded_layers_dtype = {}
+    RETURN_TYPES = ("HYBRID_CONFIG",)
+    RETURN_NAMES = ("config",)
+    FUNCTION = "configure"
+    CATEGORY = "loaders/FP8"
 
-    try:
-        with safe_open(model_path, framework="pt", device="cpu") as f:
-            all_keys = f.keys()
+    def configure(self, force_fp8_matmul, metadata_debug, guard_header_only, log_high_precision, mmap, worker_override, worker_count):
+        config = {
+            "force_fp8_matmul": force_fp8_matmul,
+            "metadata_debug": metadata_debug,
+            "guard_header_only": guard_header_only,
+            "log_high_precision": log_high_precision,
+            "mmap": mmap,
+            "worker_override": worker_override,
+            "worker_count": worker_count,
+        }
+        return (config,)
 
-            for key in all_keys:
-                for substring in excluded_layers_substrings:
-                    if substring in key:
-                        tensor = f.get_tensor(key)
-                        excluded_layers_dtype[key] = tensor.dtype
-                        # Break inner loop to avoid adding same key twice if multiple substrings match
-                        break
-
-            if "scaled_fp8" in all_keys:
-                scaled_fp8_tensor = f.get_tensor("scaled_fp8")
-                if scaled_fp8_tensor.shape[0] == 0:
-                    print("[Hybrid FP8 Loader] Scale Input model detected (scale_input enabled).")
-                    scale_input = True
-                else:
-                    print("[Hybrid FP8 Loader] Standard UNet-style model detected (scale_input disabled).")
-    except Exception as e:
-        print(f"[Hybrid FP8 Loader] Warning: Could not inspect model file: {e}")
-
-    return scale_input, excluded_layers_dtype
-
-
-def setup_hybrid_ops(model_path, model_type):
-    """A helper function to configure the hybrid ops based on user settings and model type."""
-    disable_fp8_mat_mult = False
-    excluded_layers = []
-
-    if model_type == "chroma_hybrid_large":
-        excluded_layers.extend(DISTILL_LAYER_KEYNAMES_LARGE)
-    elif model_type == "radiance_hybrid_large":
-        excluded_layers.extend(NERF_LAYER_KEYNAMES_LARGE)
-    elif model_type == "chroma_hybrid_small":
-        excluded_layers.extend(DISTILL_LAYER_KEYNAMES_SMALL)
-    elif model_type == "radiance_hybrid_small":
-        excluded_layers.extend(NERF_LAYER_KEYNAMES_SMALL)
-    elif model_type == "wan":
-        excluded_layers.extend(WAN_LAYER_KEYNAMES)
-    elif model_type == "pony_diffusion_v7":
-        excluded_layers.extend(PONYV7_LAYER_KEYNAMES)
-    elif model_type == "qwen":
-        excluded_layers.extend(QWEN_LAYER_KEYNAMES)
-        disable_fp8_mat_mult = True
-    elif model_type == "hunyuan":
-        excluded_layers.extend(HUNYUAN_LAYER_KEYNAMES)
-    elif model_type == "zimage":
-        excluded_layers.extend(ZIMAGE_LAYER_KEYNAMES)
-
-    # Use set to remove duplicate substrings
-    high_precision_substrings = list(set(excluded_layers))
-
-    scale_input_enabled, excluded_layers_dtype = detect_fp8_optimizations_and_dtype(model_path, high_precision_substrings)
-
-    hybrid_fp8_ops.set_high_precision_keys(excluded_layers_dtype)
-
-    return hybrid_fp8_ops.get_hybrid_fp8_ops(scale_input_enabled=scale_input_enabled, disable_fp8_mat_mult=disable_fp8_mat_mult)
 
 class ScaledFP8HybridUNetLoader:
     @classmethod
@@ -96,7 +44,10 @@ class ScaledFP8HybridUNetLoader:
         return {
             "required": {
                 "model_name": (folder_paths.get_filename_list("unet"), ),
-                "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7", "qwen", "hunyuan", "zimage"], {"default": "none"}),
+                "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7", "qwen", "hunyuan", "zimage"], {"default": "none", "tooltip": "Type of the model to load for proper FP8 handling"}),
+            },
+            "optional": {
+                "hybrid_config": ("HYBRID_CONFIG",{"tooltip": "Hybrid FP8 configuration from Hybrid Config node"}),
             }
         }
 
@@ -104,10 +55,40 @@ class ScaledFP8HybridUNetLoader:
     FUNCTION = "load_unet"
     CATEGORY = "loaders/FP8"
 
-    def load_unet(self, model_name, model_type):
+    def load_unet(self, model_name, model_type, hybrid_config=None):
         unet_path = folder_paths.get_full_path("unet", model_name)
-        ops = setup_hybrid_ops(unet_path, model_type)
-        model = comfy.sd.load_diffusion_model(unet_path, model_options={"custom_operations": ops})
+        # Configure ops with metadata inspection only (no tensor loading)
+        if hybrid_config is None:
+            force_fp8_matmul = False
+            metadata_debug = False
+            guard_header_only = False
+            log_high_precision = False
+            mmap = False
+            worker_override = False
+            worker_count = 2
+        else:
+            force_fp8_matmul = hybrid_config.get("force_fp8_matmul", False)
+            metadata_debug = hybrid_config.get("metadata_debug", False)
+            guard_header_only = hybrid_config.get("guard_header_only", False)
+            log_high_precision = hybrid_config.get("log_high_precision", False)
+            mmap = hybrid_config.get("mmap", False)
+            worker_override = hybrid_config.get("worker_override", False)
+            worker_count = hybrid_config.get("worker_count", 2)
+        hybrid_fp8_ops.configure_hybrid_ops(
+            model_path=unet_path,
+            model_type=model_type,
+            force_fp8_matmul=force_fp8_matmul,
+            debug_metadata=metadata_debug,
+            guard_no_tensor_read=guard_header_only,
+            log_high_precision=log_high_precision,
+        )
+        # Toggle mmap-backed state dict loading based on mmap flag
+        hybrid_fp8_ops.set_state_dict_mmap(mmap)
+        hybrid_fp8_ops.set_state_dict_workers(worker_count, worker_override)
+        # Lazy-load state dict via safetensors and use load_diffusion_model_state_dict
+        sd, metadata = hybrid_fp8_ops.load_unet_lazy(unet_path)
+        print(f"metadata keys: {metadata}")
+        model = comfy.sd.load_diffusion_model_state_dict(sd, model_options={"custom_operations": hybrid_fp8_ops.HybridOps, "fp8_optimizations": True})
         return (model,)
 
 class ScaledFP8HybridCheckpointLoader:
@@ -117,6 +98,10 @@ class ScaledFP8HybridCheckpointLoader:
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
                 "model_type": (["none", "chroma_hybrid_large", "radiance_hybrid_large", "chroma_hybrid_small", "radiance_hybrid_small", "wan", "pony_diffusion_v7", "qwen", "hunyuan", "zimage"], {"default": "none"}),
+                "force_fp8_matmul": ("BOOLEAN", {"default": False}),
+                "metadata_debug": ("BOOLEAN", {"default": False}),
+                "guard_header_only": ("BOOLEAN", {"default": False}),
+                "log_high_precision": ("BOOLEAN", {"default": False}),
             }
         }
 
@@ -124,17 +109,28 @@ class ScaledFP8HybridCheckpointLoader:
     FUNCTION = "load_checkpoint"
     CATEGORY = "loaders/FP8"
 
-    def load_checkpoint(self, ckpt_name, model_type):
+    def load_checkpoint(self, ckpt_name, model_type, force_fp8_matmul, metadata_debug, guard_header_only, log_high_precision):
         ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
-        ops = setup_hybrid_ops(ckpt_path, model_type)
-        out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"), model_options={"custom_operations": ops})
+        # Configure ops with metadata inspection only (no tensor loading)
+        hybrid_fp8_ops.configure_hybrid_ops(
+            model_path=ckpt_path,
+            model_type=model_type,
+            force_fp8_matmul=force_fp8_matmul,
+            debug_metadata=metadata_debug,
+            guard_no_tensor_read=guard_header_only,
+            log_high_precision=log_high_precision,
+        )
+        # Load checkpoint with ops class - ComfyUI will instantiate it
+        out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"), model_options={"custom_operations": hybrid_fp8_ops.HybridOps})
         return out[:3]
 
 NODE_CLASS_MAPPINGS = {
+    "HybridConfigNode": HybridConfigNode,
     "ScaledFP8HybridUNetLoader": ScaledFP8HybridUNetLoader,
     "ScaledFP8HybridCheckpointLoader": ScaledFP8HybridCheckpointLoader,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "HybridConfigNode": "Hybrid FP8 Config",
     "ScaledFP8HybridUNetLoader": "Load FP8 Scaled Diffusion Model (Choose One)",
     "ScaledFP8HybridCheckpointLoader": "Load FP8 Scaled Ckpt (Choose One)",
 }
