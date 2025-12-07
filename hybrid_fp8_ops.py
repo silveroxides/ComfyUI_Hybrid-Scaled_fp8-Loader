@@ -5,6 +5,8 @@ from comfy.ops import manual_cast, cast_bias_weight, uncast_bias_weight
 from comfy.quant_ops import QuantizedTensor
 import comfy.model_management
 import logging
+import os
+import concurrent.futures
 from . import utils
 
 
@@ -16,6 +18,15 @@ _scale_input_enabled = False
 _fp8_mat_mult_supported = False
 _configured = False
 _log_high_precision = False
+_use_mmap_for_state_dict = True
+_state_dict_worker_override = None
+_state_dict_worker_override_enabled = False
+
+
+def _strip_scaled_fp8_hook(module, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+    # Remove any global auxiliary tensor that may remain in the checkpoint
+    state_dict.pop('scaled_fp8', None)
+    state_dict.pop(prefix + 'scaled_fp8', None)
 
 
 def set_high_precision_keys(key_dtype_map):
@@ -201,6 +212,106 @@ def _log_hp(message):
     if _log_high_precision:
         logging.info(message)
 
+
+def set_state_dict_mmap(enabled: bool):
+    """Toggle mmap usage for safetensors state_dict loading."""
+    global _use_mmap_for_state_dict
+    _use_mmap_for_state_dict = bool(enabled)
+    logging.info(f"[Hybrid FP8 Loader] mmap for state_dict is {'enabled' if _use_mmap_for_state_dict else 'disabled'}")
+
+
+def set_state_dict_workers(count: int, enabled: bool):
+    """Set manual worker override for state_dict loading."""
+    global _state_dict_worker_override, _state_dict_worker_override_enabled
+    _state_dict_worker_override_enabled = bool(enabled)
+    if enabled:
+        try:
+            _state_dict_worker_override = max(1, min(16, int(count)))
+        except Exception:
+            _state_dict_worker_override = None
+    else:
+        _state_dict_worker_override = None
+    logging.info(f"[Hybrid FP8 Loader] worker override is {'enabled' if _state_dict_worker_override_enabled else 'disabled'}; value={_state_dict_worker_override}")
+
+
+def load_unet_state_dict(model_path):
+    """Load a UNet state dict from safetensors without the scaled_fp8 aux tensor."""
+    sd = {}
+    metadata = None
+    try:
+        header, header_size = utils.MemoryEfficientSafeOpen._read_header(model_path)
+        metadata = header.get("__metadata__", None)
+        keys = [k for k in header.keys() if k not in ("__metadata__", "scaled_fp8")]
+
+        # Precompute tensor sizes and offsets for planning.
+        dtype_sizes = {
+            'F64': 8, 'F32': 4, 'F16': 2, 'BF16': 2,
+            'I64': 8, 'I32': 4, 'I16': 2, 'I8': 1,
+            'U8': 1, 'BOOL': 1,
+            'F8_E5M2': 1, 'F8_E4M3': 1
+        }
+
+        entries = []  # (key, start, end, nbytes)
+        total_bytes = 0
+        for key in keys:
+            md = header[key]
+            start, end = md["data_offsets"]
+            numel = 1
+            for dim in md["shape"]:
+                numel *= dim
+            nbytes = numel * dtype_sizes.get(md["dtype"], 4)
+            entries.append((key, start, end, nbytes))
+            total_bytes += nbytes
+
+        # Read order by file offset to keep access mostly sequential.
+        entries.sort(key=lambda x: x[1])
+
+        # Memory-aware fallback: if estimated model size exceeds free RAM, avoid parallelism.
+        cpu_device = comfy.model_management.torch.device("cpu")
+        ram_free = comfy.model_management.get_free_memory(cpu_device)
+        if _state_dict_worker_override_enabled and _state_dict_worker_override is not None:
+            planned_workers = _state_dict_worker_override
+        else:
+            planned_workers = max(1, min(4, os.cpu_count() or 4))
+
+        worker_count = planned_workers if _use_mmap_for_state_dict else 1
+        if ram_free is not None and total_bytes > 0.75 * ram_free:
+            worker_count = 1
+            logging.info(f"[Hybrid FP8 Loader] Parallel load disabled due to RAM pressure (need~{total_bytes/1e9:.2f}GB, free~{ram_free/1e9:.2f}GB)")
+
+        logging.info(f"[Hybrid FP8 Loader] Loading state_dict with mmap={'on' if _use_mmap_for_state_dict else 'off'} workers={worker_count} tensors={len(entries)} total={total_bytes/1e9:.2f}GB free_ram={(ram_free/1e9 if ram_free else 0):.2f}GB override={_state_dict_worker_override if _state_dict_worker_override_enabled else 'auto'}")
+
+        # Map the entire file and reuse the parsed header for faster sequential loads.
+        with utils.MemoryEfficientSafeOpen(model_path, device="cpu", use_mmap=_use_mmap_for_state_dict, header_cache=(header, header_size)) as f:
+            # If mmap is unavailable or disabled, fall back to sequential.
+            if not _use_mmap_for_state_dict or f.mmap_obj is None or worker_count == 1:
+                for key, _, _, _ in entries:
+                    sd[key] = f.get_tensor(key)
+            else:
+                # Parallel load with preallocated result slots.
+                results = [None] * len(entries)
+
+                def _load(idx_entry):
+                    idx, (key, _, _, _) = idx_entry
+                    tensor = f.get_tensor(key)
+                    results[idx] = (key, tensor)
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as ex:
+                    ex.map(_load, enumerate(entries))
+
+                for key, tensor in results:
+                    sd[key] = tensor
+    except Exception as e:
+        logging.error(f"[Hybrid FP8 Loader] Failed lazy load state_dict: {e}")
+        raise
+    return sd, metadata
+
+
+def load_unet_lazy(model_path):
+    """Lazy load UNet via state_dict using safetensors reader and comfy load_diffusion_model_state_dict."""
+    sd, metadata = load_unet_state_dict(model_path)
+    return sd, metadata
+
 def fp8_linear(self, input):
     """
     Legacy FP8 linear function for backward compatibility.
@@ -251,6 +362,11 @@ class HybridOps(manual_cast):
     # Specify that this ops class uses FP8 dtype
     dtype = torch.float8_e4m3fn
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Strip stray scaled_fp8 tensors before state dict loading
+        self.register_state_dict_pre_hook(_strip_scaled_fp8_hook)
+
     @classmethod
     def cast_to(cls, dtype):
         """Override to prevent manual casting - we handle dtype internally."""
@@ -278,6 +394,9 @@ class HybridOps(manual_cast):
             return None
 
         def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+            # Drop global auxiliary tensor if present
+            state_dict.pop('scaled_fp8', None)
+
             # Construct the key as it appears in the map (e.g. "model.diffusion_model...weight")
             weight_key = prefix + 'weight'
 

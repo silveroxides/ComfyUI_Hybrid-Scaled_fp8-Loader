@@ -5,6 +5,7 @@ import struct
 import argparse
 import sys
 import re
+import mmap
 
 def tensor_to_dict(tensor_data):
     byte_data = bytes(tensor_data.tolist())
@@ -12,18 +13,49 @@ def tensor_to_dict(tensor_data):
     data_dict = json.loads(json_str)
     return data_dict
 
+def dict_to_tensor(data_dict):
+    json_str = json.dumps(data_dict)
+    byte_data = json_str.encode('utf-8')
+    tensor_data = torch.tensor(list(byte_data), dtype=torch.uint8)
+    return tensor_data
 
 class MemoryEfficientSafeOpen:
-    def __init__(self, filename, device='cpu'):
+    def __init__(self, filename, device='cpu', use_mmap=False, header_cache=None):
         self.filename = filename
         self.device = device
-        self.header, self.header_size = self._read_header()
+        self.use_mmap = use_mmap
+        self.mmap_obj = None
+        self._buffer = None
+
+        if header_cache is not None:
+            self.header, self.header_size = header_cache
+        else:
+            self.header, self.header_size = self._read_header(filename)
+
+        self.data_start = self.header_size + 8
         self.file = open(filename, "rb")
 
     def __enter__(self):
+        if self.use_mmap and self.mmap_obj is None:
+            try:
+                self.mmap_obj = mmap.mmap(self.file.fileno(), 0, access=mmap.ACCESS_READ)
+                self._buffer = memoryview(self.mmap_obj)
+            except Exception:
+                self.mmap_obj = None
+                self._buffer = None
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._buffer is not None:
+            try:
+                self._buffer.release()
+            except Exception:
+                pass
+        if self.mmap_obj is not None:
+            try:
+                self.mmap_obj.close()
+            except Exception:
+                pass
         self.file.close()
 
     def keys(self):
@@ -38,8 +70,13 @@ class MemoryEfficientSafeOpen:
 
         tensor_bytes = None
         if offset_start != offset_end:
-            self.file.seek(self.header_size + 8 + offset_start)
-            tensor_bytes = self.file.read(offset_end - offset_start)
+            if self._buffer is not None:
+                start = self.data_start + offset_start
+                end = self.data_start + offset_end
+                tensor_bytes = self._buffer[start:end]
+            else:
+                self.file.seek(self.data_start + offset_start)
+                tensor_bytes = self.file.read(offset_end - offset_start)
 
         return self._deserialize_tensor(tensor_bytes, metadata)
 
@@ -63,8 +100,9 @@ class MemoryEfficientSafeOpen:
 
         return tensor_to_dict(tensor)
 
-    def _read_header(self):
-        with open(self.filename, "rb") as f:
+    @staticmethod
+    def _read_header(filename):
+        with open(filename, "rb") as f:
             header_size = struct.unpack("<Q", f.read(8))[0]
             header_json = f.read(header_size).decode("utf-8")
         return json.loads(header_json), header_size
@@ -77,7 +115,13 @@ class MemoryEfficientSafeOpen:
         if tensor_bytes is None:
             byte_tensor = torch.empty(0, dtype=torch.uint8)
         else:
-            byte_tensor = torch.frombuffer(bytearray(tensor_bytes), dtype=torch.uint8)
+            buffer = tensor_bytes
+            if isinstance(buffer, bytes):
+                buffer = memoryview(buffer)
+            try:
+                byte_tensor = torch.frombuffer(buffer, dtype=torch.uint8)
+            except Exception:
+                byte_tensor = torch.tensor(bytearray(buffer), dtype=torch.uint8)
 
         if dtype_str in ["F8_E5M2", "F8_E4M3"]:
             return self._convert_float8(byte_tensor, dtype_str, shape)
@@ -118,7 +162,7 @@ class CallableMemEffSafeOpen:
     from safetensors files without needing command-line arguments.
     """
 
-    def __init__(self, filename, device='cpu'):
+    def __init__(self, filename, device='cpu', use_mmap=False, header_cache=None):
         """Initialize the callable interface.
 
         Args:
@@ -127,10 +171,12 @@ class CallableMemEffSafeOpen:
         """
         self.filename = filename
         self.device = device
+        self.use_mmap = use_mmap
+        self.header_cache = header_cache
         self._safe_open = None
 
     def __enter__(self):
-        self._safe_open = MemoryEfficientSafeOpen(self.filename, self.device)
+        self._safe_open = MemoryEfficientSafeOpen(self.filename, self.device, use_mmap=self.use_mmap, header_cache=self.header_cache)
         self._safe_open.__enter__()
         return self
 
