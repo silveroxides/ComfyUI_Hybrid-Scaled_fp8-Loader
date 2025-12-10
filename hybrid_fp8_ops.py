@@ -2,7 +2,6 @@
 
 import torch
 from comfy.ops import manual_cast, cast_bias_weight, uncast_bias_weight, disable_weight_init
-from comfy.quant_ops import QuantizedTensor
 import comfy.model_management
 import comfy.float
 import logging
@@ -451,16 +450,12 @@ class HybridOps(manual_cast):
                     # High precision layer: store as regular tensor
                     self.weight = torch.nn.Parameter(weight_tensor.to(dtype=target_dtype), requires_grad=False)
                 else:
-                    # FP8 layer: wrap in QuantizedTensor so .to() operations work properly
-                    # This is critical for LoRA compatibility - QuantizedTensor handles dtype
-                    # conversions via __torch_dispatch__ and will dequantize when needed
+                    # FP8 layer: store as raw FP8 tensor
+                    # We handle dequantization ourselves with explicit device management
+                    # This avoids issues with QuantizedTensor's layout_params not syncing
+                    # across async device transfers (CUDA streams)
                     fp8_weight = weight_tensor.to(dtype=target_dtype)
-                    layout_params = {
-                        'scale': self.scale_weight.data,
-                        'orig_dtype': torch.bfloat16  # Default compute dtype
-                    }
-                    quantized_weight = QuantizedTensor(fp8_weight, "TensorCoreFP8Layout", layout_params)
-                    self.weight = torch.nn.Parameter(quantized_weight, requires_grad=False)
+                    self.weight = torch.nn.Parameter(fp8_weight, requires_grad=False)
                 state_dict.pop(weight_key)
             else:
                 missing_keys.append(weight_key)
@@ -487,31 +482,12 @@ class HybridOps(manual_cast):
                 return out
 
             # PATH B: FP8 Layer
-            # Get the actual weight - might be QuantizedTensor or raw tensor
+            # Get the actual weight
             weight = self.weight
             if isinstance(weight, torch.nn.Parameter):
                 weight = weight.data
             
-            # Check if weight is a QuantizedTensor (our preferred storage format)
-            if isinstance(weight, QuantizedTensor):
-                # FP8 Layer with TensorCore support
-                if _fp8_mat_mult_supported:
-                    try:
-                        out = fp8_linear(self, input)
-                        if out is not None:
-                            return out
-                    except Exception as e:
-                        logging.debug(f"[Hybrid FP8 Loader] FP8 matmul failed: {e}, falling back to dequantization")
-                
-                # Fallback: dequantize and use standard linear
-                # IMPORTANT: Move to input device and dtype after dequantization
-                weight_dequant = weight.dequantize().to(device=input.device, dtype=input.dtype)
-                bias = self.bias
-                if bias is not None:
-                    bias = bias.to(device=input.device, dtype=input.dtype)
-                return torch.nn.functional.linear(input, weight_dequant, bias)
-            
-            # Raw FP8 tensor (legacy path)
+            # FP8 tensor path
             if weight.dtype == torch.float8_e4m3fn:
                 # FP8 Layer with TensorCore support
                 if _fp8_mat_mult_supported:
@@ -546,13 +522,13 @@ class HybridOps(manual_cast):
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
-                # Check if we need special handling
+                # Check if we need special handling for FP8
                 weight = self.weight
                 if isinstance(weight, torch.nn.Parameter):
                     weight = weight.data
                 
-                # QuantizedTensor or FP8 needs our special forward path
-                if isinstance(weight, QuantizedTensor) or weight.dtype == torch.float8_e4m3fn:
+                # FP8 needs our special forward path
+                if weight.dtype == torch.float8_e4m3fn:
                     return self.forward_comfy_cast_weights(*args, **kwargs)
                 return super().forward(*args, **kwargs)
 
@@ -562,7 +538,6 @@ class HybridOps(manual_cast):
             For FP8 layers, we must dequantize the weight before any math operations.
             
             Note: The 'weight' parameter passed here may be:
-            - A QuantizedTensor (our FP8 storage format)
             - A raw FP8 tensor
             - A regular float tensor (for high precision layers)
             """
@@ -570,11 +545,7 @@ class HybridOps(manual_cast):
             if self.is_high_precision_layer:
                 return weight
 
-            # Handle QuantizedTensor - dequantize it
-            if isinstance(weight, QuantizedTensor):
-                return weight.dequantize()
-            
-            # Handle raw FP8 tensor
+            # Handle FP8 tensor
             if weight.dtype == torch.float8_e4m3fn:
                 if self.scale_weight is not None:
                     scale = self.scale_weight.to(device=weight.device, dtype=torch.float32)
@@ -600,11 +571,7 @@ class HybridOps(manual_cast):
                 if return_weight:
                     return weight
                 if inplace_update:
-                    if isinstance(self.weight.data, QuantizedTensor):
-                        # Can't inplace update a QuantizedTensor easily
-                        self.weight = torch.nn.Parameter(weight, requires_grad=False)
-                    else:
-                        self.weight.data.copy_(weight)
+                    self.weight.data.copy_(weight)
                 else:
                     self.weight = torch.nn.Parameter(weight, requires_grad=False)
                 return
@@ -614,17 +581,10 @@ class HybridOps(manual_cast):
             scaled_weight = weight / self.scale_weight.to(device=weight.device, dtype=weight.dtype)
             fp8_weight = comfy.float.stochastic_rounding(scaled_weight, torch.float8_e4m3fn, seed=seed)
             
-            # Wrap in QuantizedTensor for proper handling
-            layout_params = {
-                'scale': self.scale_weight.data,
-                'orig_dtype': weight.dtype
-            }
-            quantized_weight = QuantizedTensor(fp8_weight, "TensorCoreFP8Layout", layout_params)
-            
             if return_weight:
-                return quantized_weight
+                return fp8_weight
             
-            self.weight = torch.nn.Parameter(quantized_weight, requires_grad=False)
+            self.weight = torch.nn.Parameter(fp8_weight, requires_grad=False)
 
     # Normalization layers should NEVER be FP8 - use standard manual_cast versions
     # These are inherited from manual_cast and work correctly
