@@ -1,9 +1,10 @@
 # file: ComfyUI/custom_nodes/HybridFP8Loader/hybrid_fp8_ops.py
 
 import torch
-from comfy.ops import manual_cast, cast_bias_weight, uncast_bias_weight
+from comfy.ops import manual_cast, cast_bias_weight, uncast_bias_weight, disable_weight_init
 from comfy.quant_ops import QuantizedTensor
 import comfy.model_management
+import comfy.float
 import logging
 import os
 import concurrent.futures
@@ -335,9 +336,9 @@ def fp8_linear(self, input):
 
         if scale_input is None:
             scale_input = torch.ones((), device=input.device, dtype=torch.float32)
-            input = torch.clamp(input, min=-448, max=448, out=input)
+            inp_clamped = torch.clamp(input, min=-448, max=448)
             layout_params_input = {'scale': scale_input, 'orig_dtype': input_dtype}
-            quantized_input = QuantizedTensor(input.to(dtype).contiguous(), "TensorCoreFP8Layout", layout_params_input)
+            quantized_input = QuantizedTensor(inp_clamped.to(dtype).contiguous(), "TensorCoreFP8Layout", layout_params_input)
         else:
             scale_input = scale_input.to(input.device)
             quantized_input = QuantizedTensor.from_float(input, "TensorCoreFP8Layout", scale=scale_input, dtype=dtype)
@@ -358,46 +359,29 @@ class HybridOps(manual_cast):
     """
     Hybrid operations class combining Scaled FP8 logic with High-Precision overrides.
     Uses global configuration set by configure_hybrid_ops().
+
+    IMPORTANT: We do NOT set a class-level `dtype` attribute here. This prevents
+    ComfyUI from greedily casting all layers to FP8. Each Linear layer decides
+    its own dtype based on _high_precision_keys during state dict loading.
     """
-    # Specify that this ops class uses FP8 dtype
-    dtype = torch.float8_e4m3fn
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Strip stray scaled_fp8 tensors before state dict loading
-        self.register_state_dict_pre_hook(_strip_scaled_fp8_hook)
-
-    @classmethod
-    def cast_to(cls, dtype):
-        """Override to prevent manual casting - we handle dtype internally."""
-        # Return self to prevent ComfyUI from trying to cast
-        return cls
 
     class Linear(manual_cast.Linear):
         def __init__(self, *args, **kwargs):
-            # Initialize as FP8 by default.
-            # We do not know if this is a high-precision layer until _load_from_state_dict.
-            kwargs['dtype'] = torch.float8_e4m3fn
+            # Do NOT force FP8 dtype here - let state dict loading determine dtype
             super().__init__(*args, **kwargs)
+            # Initialize scale attributes
+            self.scale_weight = None
+            self.scale_input = None
+            self.is_high_precision_layer = False
 
         def reset_parameters(self):
-            # Standard FP8 Initialization
-            if not hasattr(self, 'scale_weight'):
-                self.scale_weight = torch.nn.parameter.Parameter(data=torch.ones((), device=self.weight.device, dtype=torch.float32), requires_grad=False)
-
-            # Access scale_input_enabled from global config
-            if not _scale_input_enabled:
-                self.scale_input = None
-
-            if not hasattr(self, 'scale_input'):
-                self.scale_input = torch.nn.parameter.Parameter(data=torch.ones((), device=self.weight.device, dtype=torch.float32), requires_grad=False)
             return None
 
         def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
             # Drop global auxiliary tensor if present
             state_dict.pop('scaled_fp8', None)
 
-            # Construct the key as it appears in the map (e.g. "model.diffusion_model...weight")
+            # Construct the key as it appears in the map (e.g. "blocks.0.attn.weight")
             weight_key = prefix + 'weight'
 
             # Determine TARGET_DTYPE based on key existence in the map
@@ -406,94 +390,117 @@ class HybridOps(manual_cast):
                 # Strip FP8 scale keys eagerly so ComfyUI does not attempt FP8 conversion
                 state_dict.pop(prefix + 'scale_weight', None)
                 state_dict.pop(prefix + 'scale_input', None)
-            else:
-                target_dtype = torch.float8_e4m3fn
-
-            # If the target is NOT FP8, we perform the swap to High Precision
-            if target_dtype != torch.float8_e4m3fn:
-                # Load weight as High Precision (Native Dtype)
-                weight_tensor = state_dict.pop(weight_key, None)
-                bias_key = prefix + 'bias'
-                bias_tensor = state_dict.pop(bias_key, None)
-
-                if weight_tensor is not None:
-                    # Enforce the dtype from the dictionary (BF16/FP16/FP32)
-                    # This replaces the FP8 parameter created in __init__
-                    self.weight = torch.nn.Parameter(weight_tensor.to(dtype=target_dtype), requires_grad=False)
-                else:
-                    missing_keys.append(weight_key)
-
-                if bias_tensor is not None:
-                    self.bias = torch.nn.Parameter(bias_tensor.to(dtype=target_dtype), requires_grad=False)
-                else:
-                    self.bias = None
-
-                # Clean up unused FP8 scales from state_dict if they exist so they don't trigger unexpected keys
-                state_dict.pop(prefix + 'scale_weight', None)
-                state_dict.pop(prefix + 'scale_input', None)
-
-                # Nullify the FP8 specific attributes on the layer instance
+                self.is_high_precision_layer = True
                 self.scale_weight = None
                 self.scale_input = None
-
-                # Flag this layer so forward() knows to skip FP8 logic
-                setattr(self, 'is_high_precision_layer', True)
-                _log_hp(f"[Hybrid FP8 Loader] Marked high-precision layer {weight_key} dtype={target_dtype}")
+                _log_hp(f"[Hybrid FP8 Loader] Layer {weight_key} marked high-precision with dtype={target_dtype}")
             else:
-                # No override: Load normally as FP8
-                super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+                # FP8 layer - load scales if present
+                target_dtype = torch.float8_e4m3fn
+
+                # Load scale_weight
+                scale_weight_key = prefix + 'scale_weight'
+                if scale_weight_key in state_dict:
+                    self.scale_weight = torch.nn.Parameter(state_dict.pop(scale_weight_key), requires_grad=False)
+                else:
+                    self.scale_weight = torch.nn.Parameter(torch.ones((), dtype=torch.float32), requires_grad=False)
+
+                # Load scale_input if enabled
+                scale_input_key = prefix + 'scale_input'
+                if _scale_input_enabled and scale_input_key in state_dict:
+                    self.scale_input = torch.nn.Parameter(state_dict.pop(scale_input_key), requires_grad=False)
+                else:
+                    self.scale_input = None
+                    state_dict.pop(scale_input_key, None)  # Remove if present but not needed
+
+            # Now load the weight tensor
+            weight_tensor = state_dict.get(weight_key)
+            if weight_tensor is not None:
+                # Convert to target dtype
+                self.weight = torch.nn.Parameter(weight_tensor.to(dtype=target_dtype), requires_grad=False)
+                state_dict.pop(weight_key)
+            else:
+                missing_keys.append(weight_key)
+
+            # Handle bias
+            bias_key = prefix + 'bias'
+            bias_tensor = state_dict.get(bias_key)
+            if bias_tensor is not None:
+                # Bias should always be in compute dtype (not FP8)
+                if self.is_high_precision_layer:
+                    self.bias = torch.nn.Parameter(bias_tensor.to(dtype=target_dtype), requires_grad=False)
+                else:
+                    # For FP8 layers, keep bias in original dtype (usually bf16/fp16)
+                    self.bias = torch.nn.Parameter(bias_tensor, requires_grad=False)
+                state_dict.pop(bias_key)
 
         def forward_comfy_cast_weights(self, input):
             # PATH A: High Precision Layer (LoRA Compatible)
-            if getattr(self, 'is_high_precision_layer', False):
-                # Sanity: high-precision layers should not carry FP8 scales
-                if self.scale_weight is not None or self.scale_input is not None:
-                    _log_hp(f"[Hybrid FP8 Loader] Warning: high-precision layer retained scales (scale_weight={self.scale_weight is not None}, scale_input={self.scale_input is not None}) dtype={self.weight.dtype}")
+            if self.is_high_precision_layer:
                 # Strictly adhere to comfy.ops.manual_cast logic
                 weight, bias, offload_stream = cast_bias_weight(self, input, offloadable=True)
                 out = torch.nn.functional.linear(input, weight, bias)
                 uncast_bias_weight(self, weight, bias, offload_stream)
-                _log_hp(f"[Hybrid FP8 Loader] Forward high-precision linear dtype={weight.dtype} shape={tuple(weight.shape)}")
                 return out
 
-            # PATH B: FP8 Layer (TensorCore if available, else manual scaled)
-            if _fp8_mat_mult_supported:
-                out = fp8_linear(self, input)
-                if out is not None:
-                    return out
+            # PATH B: FP8 Layer
+            # Check if weight is actually FP8
+            if self.weight.dtype != torch.float8_e4m3fn:
+                # Weight is not FP8, use standard manual_cast path
+                weight, bias, offload_stream = cast_bias_weight(self, input, offloadable=True)
+                out = torch.nn.functional.linear(input, weight, bias)
+                uncast_bias_weight(self, weight, bias, offload_stream)
+                return out
 
-            # Manual FP8 Cast Logic fallback
+            # FP8 Layer with TensorCore support
+            if _fp8_mat_mult_supported:
+                try:
+                    out = fp8_linear(self, input)
+                    if out is not None:
+                        return out
+                except Exception as e:
+                    logging.debug(f"[Hybrid FP8 Loader] FP8 matmul failed: {e}, falling back to dequantization")
+
+            # Manual FP8 dequantization fallback - MUST dequantize before linear
             weight, bias, offload_stream = cast_bias_weight(self, input, offloadable=True)
 
-            if weight.numel() < input.numel():
-                x = torch.nn.functional.linear(input, weight * self.scale_weight.to(device=weight.device, dtype=weight.dtype), bias)
+            # Dequantize the FP8 weight using the scale
+            if self.scale_weight is not None:
+                scale = self.scale_weight.to(device=weight.device, dtype=input.dtype)
+                weight_dequant = weight.to(dtype=input.dtype) * scale
             else:
-                x = torch.nn.functional.linear(input * self.scale_weight.to(device=weight.device, dtype=weight.dtype), weight, bias)
+                weight_dequant = weight.to(dtype=input.dtype)
+
+            x = torch.nn.functional.linear(input, weight_dequant, bias)
             uncast_bias_weight(self, weight, bias, offload_stream)
             return x
 
-        def convert_weight(self, weight, inplace=False, **kwargs):
-            # If this is a high precision layer, scale_weight is None.
-            # We simply return the weight as-is.
-            if getattr(self, 'is_high_precision_layer', False):
-                _log_hp(f"[Hybrid FP8 Loader] convert_weight high-precision dtype={weight.dtype} inplace={inplace} shape={tuple(weight.shape)}")
-                return weight
+        def forward(self, *args, **kwargs):
+            if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
+                return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
+                # For non-cast path, still need to handle FP8 dequantization
+                if self.weight.dtype == torch.float8_e4m3fn:
+                    return self.forward_comfy_cast_weights(*args, **kwargs)
+                return super().forward(*args, **kwargs)
+
+        def convert_weight(self, weight, inplace=False, **kwargs):
+            # If this is a high precision layer, return weight as-is
+            if self.is_high_precision_layer:
+                return weight
+
+            # FP8 layer: dequantize the weight
+            if self.scale_weight is not None:
                 if inplace:
                     weight *= self.scale_weight.to(device=weight.device, dtype=weight.dtype)
                     return weight
                 else:
-                    if inplace:
-                        weight *= self.scale_weight.to(device=weight.device, dtype=weight.dtype)
-                        return weight
-                    else:
-                        return weight.to(dtype=torch.float32) * self.scale_weight.to(device=weight.device, dtype=torch.float32)
+                    return weight.to(dtype=torch.float32) * self.scale_weight.to(device=weight.device, dtype=torch.float32)
+            return weight
 
         def set_weight(self, weight, inplace_update=False, seed=None, return_weight=False, **kwargs):
-            # If this is a high precision layer, scale_weight is None.
-            # We skip the FP8 stochastic rounding/scaling.
-            if self.scale_weight is None:
-                _log_hp(f"[Hybrid FP8 Loader] set_weight high-precision dtype={weight.dtype} inplace_update={inplace_update} return_weight={return_weight} shape={tuple(weight.shape)}")
+            # If this is a high precision layer, just set the weight directly
+            if self.is_high_precision_layer or self.scale_weight is None:
                 if return_weight:
                     return weight
                 if inplace_update:
@@ -502,13 +509,53 @@ class HybridOps(manual_cast):
                     self.weight = torch.nn.Parameter(weight, requires_grad=False)
                 return
 
-            # FP8 Logic
-            weight = comfy.float.stochastic_rounding(weight / self.scale_weight.to(device=weight.device, dtype=weight.dtype), self.weight.dtype, seed=seed)
+            # FP8 Logic: quantize the weight with stochastic rounding
+            weight = comfy.float.stochastic_rounding(weight / self.scale_weight.to(device=weight.device, dtype=weight.dtype), torch.float8_e4m3fn, seed=seed)
             if return_weight:
                 return weight
             if inplace_update:
                 self.weight.data.copy_(weight)
             else:
                 self.weight = torch.nn.Parameter(weight, requires_grad=False)
+
+    # Normalization layers should NEVER be FP8 - use standard manual_cast versions
+    # These are inherited from manual_cast and work correctly
+    class GroupNorm(manual_cast.GroupNorm):
+        pass
+
+    class LayerNorm(manual_cast.LayerNorm):
+        pass
+
+    class RMSNorm(manual_cast.RMSNorm):
+        pass
+
+    # Convolution layers - use standard manual_cast versions
+    class Conv1d(manual_cast.Conv1d):
+        pass
+
+    class Conv2d(manual_cast.Conv2d):
+        pass
+
+    class Conv3d(manual_cast.Conv3d):
+        pass
+
+    class ConvTranspose1d(manual_cast.ConvTranspose1d):
+        pass
+
+    class ConvTranspose2d(manual_cast.ConvTranspose2d):
+        pass
+
+    # Embedding layer - use standard manual_cast version
+    class Embedding(manual_cast.Embedding):
+        pass
+
+    @classmethod
+    def conv_nd(cls, dims, *args, **kwargs):
+        if dims == 2:
+            return cls.Conv2d(*args, **kwargs)
+        elif dims == 3:
+            return cls.Conv3d(*args, **kwargs)
+        else:
+            raise ValueError(f"unsupported dimensions: {dims}")
 
 
