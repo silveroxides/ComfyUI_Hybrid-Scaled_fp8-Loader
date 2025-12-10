@@ -504,7 +504,8 @@ class HybridOps(manual_cast):
                         logging.debug(f"[Hybrid FP8 Loader] FP8 matmul failed: {e}, falling back to dequantization")
                 
                 # Fallback: dequantize and use standard linear
-                weight_dequant = weight.dequantize().to(dtype=input.dtype)
+                # IMPORTANT: Move to input device and dtype after dequantization
+                weight_dequant = weight.dequantize().to(device=input.device, dtype=input.dtype)
                 bias = self.bias
                 if bias is not None:
                     bias = bias.to(device=input.device, dtype=input.dtype)
@@ -522,11 +523,13 @@ class HybridOps(manual_cast):
                         logging.debug(f"[Hybrid FP8 Loader] FP8 matmul failed: {e}, falling back to dequantization")
 
                 # Manual FP8 dequantization fallback
+                # Move weight to input device first, then convert dtype
+                weight_on_device = weight.to(device=input.device)
                 if self.scale_weight is not None:
-                    scale = self.scale_weight.to(device=weight.device, dtype=input.dtype)
-                    weight_dequant = weight.to(dtype=input.dtype) * scale
+                    scale = self.scale_weight.to(device=input.device, dtype=input.dtype)
+                    weight_dequant = weight_on_device.to(dtype=input.dtype) * scale
                 else:
-                    weight_dequant = weight.to(dtype=input.dtype)
+                    weight_dequant = weight_on_device.to(dtype=input.dtype)
                 
                 bias = self.bias
                 if bias is not None:
