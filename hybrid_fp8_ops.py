@@ -2,6 +2,7 @@
 
 import torch
 from comfy.ops import manual_cast, cast_bias_weight, uncast_bias_weight, disable_weight_init
+from comfy.quant_ops import QuantizedTensor
 import comfy.model_management
 import comfy.float
 import logging
