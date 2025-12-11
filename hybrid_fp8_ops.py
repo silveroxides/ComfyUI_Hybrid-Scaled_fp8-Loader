@@ -54,9 +54,9 @@ def configure_hybrid_ops(model_path, model_type="none", force_fp8_matmul=False, 
 
     # Model type exclusion lists
     DISTILL_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "final_layer", "img_in", "txt_in"]
-    NERF_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder", "txt_in"]
+    NERF_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder", "txt_in", "_x0_"]
     DISTILL_LAYER_KEYNAMES_SMALL = ["distilled_guidance_layer"]
-    NERF_LAYER_KEYNAMES_SMALL = ["distilled_guidance_layer", "img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder"]
+    NERF_LAYER_KEYNAMES_SMALL = ["distilled_guidance_layer", "img_in_patch", "nerf_blocks", "nerf_final_layer_conv", "nerf_image_embedder", "_x0_"]
     WAN_LAYER_KEYNAMES = [
         "patch_embedding", "ref_conv", "control_adapter", "motion_encoder.enc.net_app",
         "face_encoder.conv", "pose_patch_embedding", "text_embedding", "time_embedding",
