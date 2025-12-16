@@ -214,6 +214,69 @@ def _log_hp(message):
         logging.info(message)
 
 
+def _dequantize_weight(weight, scale, target_dtype):
+    """
+    Dequantize FP8 weight using per-tensor or blockwise scale.
+
+    Args:
+        weight: FP8 weight tensor
+        scale: Scale tensor - scalar, 1D, or 3D (out_features, num_blocks, 1) for blockwise
+        target_dtype: Target dtype for dequantized weight
+
+    Returns:
+        Dequantized weight tensor in target_dtype
+    """
+    if scale is None:
+        return weight.to(dtype=target_dtype)
+
+    if scale.ndim == 3:
+        # Blockwise scaling: scale shape is (out_features, num_blocks, 1)
+        out_features, num_blocks, _ = scale.shape
+        # Reshape weight to (out_features, num_blocks, block_size)
+        weight_blocked = weight.view(out_features, num_blocks, -1)
+        # Dequantize each block
+        dequant = weight_blocked.to(dtype=target_dtype) * scale.to(dtype=target_dtype)
+        # Reshape back to original shape
+        return dequant.view(weight.shape)
+    else:
+        # Per-tensor or per-channel scaling
+        return weight.to(dtype=target_dtype) * scale.to(dtype=target_dtype)
+
+
+def _requantize_weight(weight, scale, seed=None):
+    """
+    Re-quantize a float weight back to FP8 using per-tensor or blockwise scale.
+    Used for LoRA patching where weights are modified in float then re-quantized.
+
+    Args:
+        weight: Float weight tensor to quantize
+        scale: Scale tensor - scalar, 1D, or 3D (out_features, num_blocks, 1) for blockwise
+        seed: Optional seed for stochastic rounding
+
+    Returns:
+        FP8 quantized weight tensor
+    """
+    if scale is None:
+        return comfy.float.stochastic_rounding(weight, torch.float8_e4m3fn, seed=seed)
+
+    if scale.ndim == 3:
+        # Blockwise scaling: scale shape is (out_features, num_blocks, 1)
+        out_features, num_blocks, _ = scale.shape
+        # Reshape weight to (out_features, num_blocks, block_size)
+        weight_blocked = weight.view(out_features, num_blocks, -1)
+        # Divide by scale to get values in FP8 range
+        scale_on_device = scale.to(device=weight.device, dtype=weight.dtype)
+        scaled = weight_blocked / scale_on_device
+        # Reshape back then convert to FP8
+        scaled = scaled.view(weight.shape)
+        return comfy.float.stochastic_rounding(scaled, torch.float8_e4m3fn, seed=seed)
+    else:
+        # Per-tensor or per-channel scaling
+        scale_on_device = scale.to(device=weight.device, dtype=weight.dtype)
+        scaled_weight = weight / scale_on_device
+        return comfy.float.stochastic_rounding(scaled_weight, torch.float8_e4m3fn, seed=seed)
+
+
 def set_state_dict_mmap(enabled: bool):
     """Toggle mmap usage for safetensors state_dict loading."""
     global _use_mmap_for_state_dict
@@ -322,11 +385,11 @@ def fp8_linear(self, input):
     weight = self.weight
     if isinstance(weight, torch.nn.Parameter):
         weight = weight.data
-    
+
     # If weight is already a QuantizedTensor, use it directly
     if isinstance(weight, QuantizedTensor):
         input_dtype = input.dtype
-        
+
         if input.ndim == 3 or input.ndim == 2:
             # Prepare input as QuantizedTensor
             scale_input = self.scale_input
@@ -338,16 +401,16 @@ def fp8_linear(self, input):
             else:
                 scale_input = scale_input.to(input.device)
                 quantized_input = QuantizedTensor.from_float(input, "TensorCoreFP8Layout", scale=scale_input, dtype=torch.float8_e4m3fn)
-            
+
             # Use the weight QuantizedTensor directly
             bias = self.bias
             if bias is not None:
                 bias = bias.to(device=input.device, dtype=input_dtype)
-            
+
             o = torch.nn.functional.linear(quantized_input, weight, bias)
             return o
         return None
-    
+
     # Raw FP8 tensor path
     dtype = weight.dtype
     if dtype not in [torch.float8_e4m3fn]:
@@ -487,7 +550,7 @@ class HybridOps(manual_cast):
             weight = self.weight
             if isinstance(weight, torch.nn.Parameter):
                 weight = weight.data
-            
+
             # FP8 tensor path
             if weight.dtype == torch.float8_e4m3fn:
                 # FP8 Layer with TensorCore support
@@ -499,15 +562,12 @@ class HybridOps(manual_cast):
                     except Exception as e:
                         logging.debug(f"[Hybrid FP8 Loader] FP8 matmul failed: {e}, falling back to dequantization")
 
-                # Manual FP8 dequantization fallback
+                # Manual FP8 dequantization fallback (supports blockwise scales)
                 # Move weight to input device first, then convert dtype
                 weight_on_device = weight.to(device=input.device)
-                if self.scale_weight is not None:
-                    scale = self.scale_weight.to(device=input.device, dtype=input.dtype)
-                    weight_dequant = weight_on_device.to(dtype=input.dtype) * scale
-                else:
-                    weight_dequant = weight_on_device.to(dtype=input.dtype)
-                
+                scale = self.scale_weight.to(device=input.device) if self.scale_weight is not None else None
+                weight_dequant = _dequantize_weight(weight_on_device, scale, input.dtype)
+
                 bias = self.bias
                 if bias is not None:
                     bias = bias.to(device=input.device, dtype=input.dtype)
@@ -527,7 +587,7 @@ class HybridOps(manual_cast):
                 weight = self.weight
                 if isinstance(weight, torch.nn.Parameter):
                     weight = weight.data
-                
+
                 # FP8 needs our special forward path
                 if weight.dtype == torch.float8_e4m3fn:
                     return self.forward_comfy_cast_weights(*args, **kwargs)
@@ -537,7 +597,8 @@ class HybridOps(manual_cast):
             """
             Convert weight for LoRA patching. This is called during LoRA application.
             For FP8 layers, we must dequantize the weight before any math operations.
-            
+            Supports both per-tensor and blockwise (3D) scales.
+
             Note: The 'weight' parameter passed here may be:
             - A raw FP8 tensor
             - A regular float tensor (for high precision layers)
@@ -546,26 +607,21 @@ class HybridOps(manual_cast):
             if self.is_high_precision_layer:
                 return weight
 
-            # Handle FP8 tensor
+            # Handle FP8 tensor (supports blockwise scales)
             if weight.dtype == torch.float8_e4m3fn:
-                if self.scale_weight is not None:
-                    scale = self.scale_weight.to(device=weight.device, dtype=torch.float32)
-                    return weight.to(dtype=torch.float32) * scale
-                else:
-                    return weight.to(dtype=torch.float32)
-            
+                scale = self.scale_weight.to(device=weight.device) if self.scale_weight is not None else None
+                return _dequantize_weight(weight, scale, torch.float32)
+
             # Non-FP8 weight with scale (shouldn't normally happen, but handle it)
             if self.scale_weight is not None:
-                if inplace:
-                    weight *= self.scale_weight.to(device=weight.device, dtype=weight.dtype)
-                    return weight
-                else:
-                    return weight.to(dtype=torch.float32) * self.scale_weight.to(device=weight.device, dtype=torch.float32)
+                scale = self.scale_weight.to(device=weight.device)
+                return _dequantize_weight(weight.to(torch.float32), scale, torch.float32)
             return weight
 
         def set_weight(self, weight, inplace_update=False, seed=None, return_weight=False, **kwargs):
             """
             Set weight after LoRA patching. Re-quantizes the weight back to FP8 if needed.
+            Supports both per-tensor and blockwise (3D) scales.
             """
             # If this is a high precision layer, just set the weight directly
             if self.is_high_precision_layer or self.scale_weight is None:
@@ -577,14 +633,12 @@ class HybridOps(manual_cast):
                     self.weight = torch.nn.Parameter(weight, requires_grad=False)
                 return
 
-            # FP8 Logic: quantize the weight with stochastic rounding
-            # First divide by scale, then convert to FP8
-            scaled_weight = weight / self.scale_weight.to(device=weight.device, dtype=weight.dtype)
-            fp8_weight = comfy.float.stochastic_rounding(scaled_weight, torch.float8_e4m3fn, seed=seed)
-            
+            # FP8 Logic: re-quantize with stochastic rounding (supports blockwise scales)
+            fp8_weight = _requantize_weight(weight, self.scale_weight, seed=seed)
+
             if return_weight:
                 return fp8_weight
-            
+
             self.weight = torch.nn.Parameter(fp8_weight, requires_grad=False)
 
     # Normalization layers should NEVER be FP8 - use standard manual_cast versions
