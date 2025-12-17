@@ -626,8 +626,10 @@ class HybridOps(manual_cast):
             fp8_weight = comfy.float.stochastic_rounding(scaled_weight, torch.float8_e4m3fn, seed=seed)
             
             # Re-wrap in QuantizedTensor for ComfyUI dispatch
+            # Ensure scale is on same device as weight
+            scale_on_device = self.scale_weight.to(device=fp8_weight.device)
             layout_params = {
-                'scale': self.scale_weight,
+                'scale': scale_on_device,
                 'orig_dtype': weight.dtype,
             }
             quantized_weight = QuantizedTensor(fp8_weight, "TensorCoreFP8Layout", layout_params)
