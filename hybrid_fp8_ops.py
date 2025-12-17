@@ -415,6 +415,11 @@ class HybridOps(manual_cast):
             # Construct the key as it appears in the map (e.g. "blocks.0.attn.weight")
             weight_key = prefix + 'weight'
 
+            # DEBUG: Log what we're checking
+            logging.info(f"[Hybrid FP8 DEBUG] Checking weight_key: '{weight_key}'")
+            if len(_high_precision_keys) > 0 and len(_high_precision_keys) < 20:
+                logging.info(f"[Hybrid FP8 DEBUG] _high_precision_keys sample: {list(_high_precision_keys.keys())[:5]}")
+
             # Determine TARGET_DTYPE based on key existence in the map
             if weight_key in _high_precision_keys:
                 target_dtype = _high_precision_keys[weight_key]
