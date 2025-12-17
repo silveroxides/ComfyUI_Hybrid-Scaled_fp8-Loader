@@ -585,7 +585,11 @@ class HybridOps(manual_cast):
             if self.is_high_precision_layer:
                 return weight
 
-            # Handle FP8 tensor
+            # Handle QuantizedTensor (new path)
+            if isinstance(weight, QuantizedTensor):
+                return weight.dequantize()
+
+            # Handle raw FP8 tensor (legacy path)
             if weight.dtype == torch.float8_e4m3fn:
                 if self.scale_weight is not None:
                     scale = self.scale_weight.to(device=weight.device, dtype=torch.float32)
@@ -621,10 +625,17 @@ class HybridOps(manual_cast):
             scaled_weight = weight / self.scale_weight.to(device=weight.device, dtype=weight.dtype)
             fp8_weight = comfy.float.stochastic_rounding(scaled_weight, torch.float8_e4m3fn, seed=seed)
             
-            if return_weight:
-                return fp8_weight
+            # Re-wrap in QuantizedTensor for ComfyUI dispatch
+            layout_params = {
+                'scale': self.scale_weight,
+                'orig_dtype': weight.dtype,
+            }
+            quantized_weight = QuantizedTensor(fp8_weight, "TensorCoreFP8Layout", layout_params)
             
-            self.weight = torch.nn.Parameter(fp8_weight, requires_grad=False)
+            if return_weight:
+                return quantized_weight
+            
+            self.weight = torch.nn.Parameter(quantized_weight, requires_grad=False)
 
     # Normalization layers should NEVER be FP8 - use standard manual_cast versions
     # These are inherited from manual_cast and work correctly
