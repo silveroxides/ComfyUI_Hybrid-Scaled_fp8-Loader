@@ -471,23 +471,31 @@ class HybridOps(manual_cast):
                 # Load weight tensor
                 weight_tensor = state_dict.pop(weight_key, None)
                 if weight_tensor is not None:
-                    # Ensure weight is FP8
-                    if weight_tensor.dtype != torch.float8_e4m3fn:
-                        weight_tensor = weight_tensor.to(dtype=torch.float8_e4m3fn)
-                    
-                    # Create QuantizedTensor with TensorCoreFP8Layout (like mixed_precision_ops)
-                    layout_params = {
-                        'scale': scale,
-                        'orig_dtype': torch.bfloat16,  # Will be updated in forward
-                    }
-                    self.weight = torch.nn.Parameter(
-                        QuantizedTensor(weight_tensor, "TensorCoreFP8Layout", layout_params),
-                        requires_grad=False
-                    )
-                    
-                    # Store scale for fallback dequantization path
-                    self.scale_weight = scale
-                    self.scale_input = None
+                    # Safety check: if weight is NOT FP8, treat as high-precision
+                    if weight_tensor.dtype in (torch.float16, torch.bfloat16, torch.float32):
+                        self.is_high_precision_layer = True
+                        self.weight = torch.nn.Parameter(weight_tensor, requires_grad=False)
+                        self.scale_weight = None
+                        self.scale_input = None
+                        _log_hp(f"[Hybrid FP8 Loader] Layer {weight_key} orphaned scale w/ {weight_tensor.dtype} - HP")
+                    else:
+                        # Normal FP8 path
+                        if weight_tensor.dtype != torch.float8_e4m3fn:
+                            weight_tensor = weight_tensor.to(dtype=torch.float8_e4m3fn)
+                        
+                        # Create QuantizedTensor with TensorCoreFP8Layout (like mixed_precision_ops)
+                        layout_params = {
+                            'scale': scale,
+                            'orig_dtype': torch.bfloat16,  # Will be updated in forward
+                        }
+                        self.weight = torch.nn.Parameter(
+                            QuantizedTensor(weight_tensor, "TensorCoreFP8Layout", layout_params),
+                            requires_grad=False
+                        )
+                        
+                        # Store scale for fallback dequantization path
+                        self.scale_weight = scale
+                        self.scale_input = None
                 else:
                     missing_keys.append(weight_key)
                     
