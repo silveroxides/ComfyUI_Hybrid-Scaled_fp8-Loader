@@ -11,8 +11,8 @@ import concurrent.futures
 from . import utils
 
 
-# Substring patterns for high-precision layers
-_high_precision_substrings = []  # List of substrings like ["distilled_guidance_layer", "img_in"]
+# Dictionary mapping specific full tensor keys to their desired dtype
+_high_precision_keys = {} # Format: { "full.layer.name.weight": torch.float16, ... }
 
 # Global configuration state
 _scale_input_enabled = False
@@ -30,11 +30,11 @@ def _strip_scaled_fp8_hook(module, state_dict, prefix, local_metadata, strict, m
     state_dict.pop(prefix + 'scaled_fp8', None)
 
 
-def set_high_precision_substrings(substrings):
-    """Sets the list of substrings that mark layers as high-precision."""
-    global _high_precision_substrings
-    _high_precision_substrings = list(set(substrings))  # Deduplicate
-    print(f"[Hybrid FP8 Ops] High precision patterns set: {_high_precision_substrings}")
+def set_high_precision_keys(key_dtype_map):
+    """Sets the dictionary of {full_tensor_name: dtype}."""
+    global _high_precision_keys
+    _high_precision_keys = key_dtype_map
+    print(f"[Hybrid FP8 Ops] High precision overrides set for {len(key_dtype_map)} layers.")
 
 
 def configure_hybrid_ops(model_path, model_type="none", force_fp8_matmul=False, scale_input_enabled=None, disable_fp8_mat_mult=False, debug_metadata=False, guard_no_tensor_read=False, log_high_precision=False):
@@ -162,10 +162,22 @@ def configure_hybrid_ops(model_path, model_type="none", force_fp8_matmul=False, 
                     excluded_layers_dtype[key] = dtype_str_to_torch.get(dtype_str, torch.float32)
                     break
 
-        print(f"[Hybrid FP8 Loader] Found {len(excluded_layers_dtype)} high-precision layers in file")
+        # Strip common prefixes to match ComfyUI's internal key format
+        excluded_layers_dtype_stripped = {}
+        common_prefixes = ["model.diffusion_model.", "model.", "diffusion_model."]
 
-        # Set high precision substrings globally (dtype will be read from tensor during loading)
-        set_high_precision_substrings(high_precision_substrings)
+        for key, dtype in excluded_layers_dtype.items():
+            stripped_key = key
+            for prefix in common_prefixes:
+                if key.startswith(prefix):
+                    stripped_key = key[len(prefix):]
+                    break
+            excluded_layers_dtype_stripped[stripped_key] = dtype
+
+        print(f"[Hybrid FP8 Loader] Mapped {len(excluded_layers_dtype_stripped)} high-precision layers")
+
+        # Set high precision keys globally
+        set_high_precision_keys(excluded_layers_dtype_stripped)
 
         # Use detected scale_input if not overridden
         if scale_input_enabled is None:
@@ -400,75 +412,44 @@ class HybridOps(manual_cast):
             # Drop global auxiliary tensor if present
             state_dict.pop('scaled_fp8', None)
 
-            # Construct the key for this layer (e.g. "img_in.weight")
+            # Construct the key as it appears in the map
             weight_key = prefix + 'weight'
 
-            # Check if weight_key matches any high-precision substring pattern
-            is_high_precision = False
-            for pattern in _high_precision_substrings:
-                if pattern in weight_key:
-                    is_high_precision = True
-                    break
+            # Determine if this is a high-precision layer
+            if weight_key in _high_precision_keys:
+                target_dtype = _high_precision_keys[weight_key]
+                
+                # Load weight as High Precision (Native Dtype)
+                weight_tensor = state_dict.pop(weight_key, None)
+                bias_key = prefix + 'bias'
+                bias_tensor = state_dict.pop(bias_key, None)
 
-            # Determine TARGET_DTYPE based on substring match
-            if is_high_precision:
-                # Get dtype from the actual weight tensor in state_dict (let ComfyUI handle device dtype)
-                weight_in_sd = state_dict.get(weight_key)
-                target_dtype = weight_in_sd.dtype if weight_in_sd is not None else None
-                # Strip FP8 scale keys eagerly so ComfyUI does not attempt FP8 conversion
-                state_dict.pop(prefix + 'scale_weight', None)
-                state_dict.pop(prefix + 'scale_input', None)
-                self.is_high_precision_layer = True
-                self.scale_weight = None
-                self.scale_input = None
-                _log_hp(f"[Hybrid FP8 Loader] Layer {weight_key} marked high-precision with native dtype={target_dtype}")
-            else:
-                # FP8 layer - load scales if present
-                target_dtype = torch.float8_e4m3fn
-
-                # Load scale_weight
-                scale_weight_key = prefix + 'scale_weight'
-                if scale_weight_key in state_dict:
-                    self.scale_weight = torch.nn.Parameter(state_dict.pop(scale_weight_key), requires_grad=False)
-                else:
-                    self.scale_weight = torch.nn.Parameter(torch.ones((), dtype=torch.float32), requires_grad=False)
-
-                # Load scale_input if enabled
-                scale_input_key = prefix + 'scale_input'
-                if _scale_input_enabled and scale_input_key in state_dict:
-                    self.scale_input = torch.nn.Parameter(state_dict.pop(scale_input_key), requires_grad=False)
-                else:
-                    self.scale_input = None
-                    state_dict.pop(scale_input_key, None)  # Remove if present but not needed
-
-            # Now load the weight tensor
-            weight_tensor = state_dict.get(weight_key)
-            if weight_tensor is not None:
-                if self.is_high_precision_layer:
-                    # High precision layer: store as regular tensor
+                if weight_tensor is not None:
+                    # Enforce the dtype from the dictionary (BF16/FP16/FP32)
                     self.weight = torch.nn.Parameter(weight_tensor.to(dtype=target_dtype), requires_grad=False)
                 else:
-                    # FP8 layer: store as raw FP8 tensor
-                    # We handle dequantization ourselves with explicit device management
-                    # This avoids issues with QuantizedTensor's layout_params not syncing
-                    # across async device transfers (CUDA streams)
-                    fp8_weight = weight_tensor.to(dtype=target_dtype)
-                    self.weight = torch.nn.Parameter(fp8_weight, requires_grad=False)
-                state_dict.pop(weight_key)
-            else:
-                missing_keys.append(weight_key)
+                    missing_keys.append(weight_key)
 
-            # Handle bias
-            bias_key = prefix + 'bias'
-            bias_tensor = state_dict.get(bias_key)
-            if bias_tensor is not None:
-                # Bias should always be in compute dtype (not FP8)
-                if self.is_high_precision_layer:
+                if bias_tensor is not None:
                     self.bias = torch.nn.Parameter(bias_tensor.to(dtype=target_dtype), requires_grad=False)
                 else:
-                    # For FP8 layers, keep bias in original dtype (usually bf16/fp16)
-                    self.bias = torch.nn.Parameter(bias_tensor, requires_grad=False)
-                state_dict.pop(bias_key)
+                    self.bias = None
+
+                # Clean up unused FP8 scales from state_dict
+                state_dict.pop(prefix + 'scale_weight', None)
+                state_dict.pop(prefix + 'scale_input', None)
+
+                # Nullify FP8 specific attributes
+                self.scale_weight = None
+                self.scale_input = None
+
+                # Flag this layer for forward()
+                self.is_high_precision_layer = True
+                _log_hp(f"[Hybrid FP8 Loader] Layer {weight_key} marked high-precision with dtype={target_dtype}")
+            else:
+                # FP8 layer: delegate to parent class (ComfyUI's native FP8 handling)
+                self.is_high_precision_layer = False
+                super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
         def forward_comfy_cast_weights(self, input):
             # PATH A: High Precision Layer (LoRA Compatible)
