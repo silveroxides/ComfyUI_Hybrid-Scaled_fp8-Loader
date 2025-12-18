@@ -535,8 +535,28 @@ class HybridOps(manual_cast):
                 if bias is not None:
                     bias = bias.to(device=input.device, dtype=input.dtype)
                 
-                # This triggers QuantizedTensor dispatch -> fp8_linear handler
-                return torch.nn.functional.linear(input, weight, bias)
+                # Quantize input as QuantizedTensor for FP8 matmul dispatch
+                # Both input AND weight must be QuantizedTensor for _scaled_mm to trigger
+                input_dtype = input.dtype
+                scale_input = self.scale_input
+                if scale_input is None:
+                    scale_input = torch.ones((), device=input.device, dtype=torch.float32)
+                    inp_clamped = torch.clamp(input, min=-448, max=448)
+                    layout_params_input = {'scale': scale_input, 'orig_dtype': input_dtype}
+                    quantized_input = QuantizedTensor(
+                        inp_clamped.to(torch.float8_e4m3fn).contiguous(),
+                        "TensorCoreFP8Layout",
+                        layout_params_input
+                    )
+                else:
+                    scale_input = scale_input.to(input.device)
+                    quantized_input = QuantizedTensor.from_float(
+                        input, "TensorCoreFP8Layout",
+                        scale=scale_input, dtype=torch.float8_e4m3fn
+                    )
+                
+                # Now BOTH are QuantizedTensor -> _scaled_mm will be used
+                return torch.nn.functional.linear(quantized_input, weight, bias)
             
             # Fallback for raw FP8 tensor (legacy path)
             if weight.dtype == torch.float8_e4m3fn:
